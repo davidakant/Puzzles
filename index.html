@@ -2,18 +2,34 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Video Jigsaw</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body {
-    width: 100%; height: 100%;
+  html { width: 100%; height: 100%; }
+  body {
+    min-height: 100%;
     background: #0e0b1a;
     color: #fff;
     font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: auto;   /* scroll instead of resizing if the PC window is smaller than the iPad size below */
   }
-  #app { display: flex; flex-direction: column; width: 100vw; height: 100vh; }
+  /* Fixed at the iPad Air 10.9" landscape size (1180x820 logical px) —
+     this never grows/shrinks with the browser window. On an actual iPad
+     in landscape it fills the screen exactly; on a PC it just sits at
+     this fixed size, centered, instead of stretching to the window. */
+  #app {
+    display: flex;
+    flex-direction: column;
+    width: 1180px;
+    height: 820px;
+    flex-shrink: 0;
+  }
 
   header {
     flex-shrink: 0;
@@ -26,11 +42,6 @@
     border-bottom: 1px solid rgba(255,255,255,0.08);
   }
   header h1 { font-size: 15px; font-weight: 700; margin-right: auto; }
-  header label {
-    font-size: 12px; color: rgba(255,255,255,0.6);
-    display: flex; align-items: center; gap: 6px;
-  }
-  input[type=file] { font-size: 12px; color: #fff; max-width: 160px; }
   button.btn {
     font-size: 13px; font-weight: 500; padding: 7px 14px;
     background: #221d38; color: #fff; border: 1px solid rgba(255,255,255,0.16);
@@ -65,10 +76,20 @@
     background: rgba(255,255,255,0.02);
     pointer-events: none;
   }
-  #board-target .cell {
+
+  /* Solved message printed below the puzzle boundary (no blocking modal) */
+  #solved-text {
     position: absolute;
-    outline: 1px dashed rgba(255,255,255,0.08);
+    z-index: 0;
+    text-align: center;
+    font-size: 22px;
+    font-weight: 700;
+    color: #30d158;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    pointer-events: none;
   }
+  #solved-text.visible { opacity: 1; }
 
   canvas.piece {
     position: absolute;
@@ -105,8 +126,6 @@
     border-radius: 20px; padding: 36px 48px; text-align: center;
     box-shadow: 0 24px 80px rgba(0,0,0,0.7);
   }
-  .overlay .emoji { font-size: 48px; margin-bottom: 10px; }
-  .overlay h2 { font-size: 26px; margin-bottom: 20px; }
 
   #start-overlay button.btn { font-size: 16px; padding: 12px 26px; }
 
@@ -127,27 +146,19 @@
 
   <div id="app">
     <header>
-      <h1>Video Jigsaw — Phase 3 (interlocking shapes)</h1>
-      <label>Load video: <input type="file" id="file-input" accept="video/*"></label>
-      <button class="btn" id="shuffle-btn">Shuffle</button>
+      <h1>Video Jigsaw</h1>
+      <button class="btn" id="reshuffle-btn">Reshuffle</button>
       <div id="diag">starting…</div>
     </header>
     <div id="board-wrap">
       <div id="board-target"></div>
+      <div id="solved-text">Solved!</div>
     </div>
   </div>
 
   <div id="start-overlay" class="overlay hidden">
     <div class="card">
       <button class="btn accent" id="start-btn">▶ Start Video</button>
-    </div>
-  </div>
-
-  <div id="solved-overlay" class="overlay hidden">
-    <div class="card">
-      <div class="emoji">🧩</div>
-      <h2>Solved!</h2>
-      <button class="btn accent" id="shuffle-again-btn">Shuffle Again</button>
     </div>
   </div>
 
@@ -164,13 +175,11 @@ const SNAP_DIST = 20;
 const video        = document.getElementById('source');
 const boardWrap     = document.getElementById('board-wrap');
 const boardTarget   = document.getElementById('board-target');
+const solvedText    = document.getElementById('solved-text');
 const diagEl        = document.getElementById('diag');
-const fileInput     = document.getElementById('file-input');
 const startOverlay  = document.getElementById('start-overlay');
 const startBtn      = document.getElementById('start-btn');
-const solvedOverlay = document.getElementById('solved-overlay');
-const shuffleBtn    = document.getElementById('shuffle-btn');
-const shuffleAgainBtn = document.getElementById('shuffle-again-btn');
+const reshuffleBtn  = document.getElementById('reshuffle-btn');
 
 /* ── State ───────────────────────────────────────────── */
 let offCanvas = null, offCtx = null;
@@ -207,17 +216,9 @@ function tryPlay() {
 }
 startBtn.addEventListener('click', () => video.play().then(() => startOverlay.classList.add('hidden')));
 
-fileInput.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  video.src = URL.createObjectURL(file);
-  video.load();
-  tryPlay();
-});
-
-shuffleBtn.addEventListener('click', scatterAllPieces);
-shuffleAgainBtn.addEventListener('click', scatterAllPieces);
-window.addEventListener('resize', relayout);
+reshuffleBtn.addEventListener('click', scatterAllPieces);
+// No window 'resize' listener: #app is a fixed 1180x820 box (see CSS),
+// so board-wrap's dimensions never change after initial layout.
 
 /* ── Offscreen buffer (the single per-frame video grab) ─ */
 function buildOffscreen() {
@@ -241,6 +242,8 @@ function buildOffscreen() {
 }
 
 /* ── Geometry: where the target board sits inside board-wrap ─ */
+const BOARD_SHRINK = 0.6; // leaves perimeter room for scattering pieces
+
 function computeGeometry() {
   const areaW = boardWrap.clientWidth  - 40;
   const areaH = boardWrap.clientHeight - 40;
@@ -249,6 +252,8 @@ function computeGeometry() {
   let boardW, boardH;
   if (areaW / ar <= areaH) { boardW = areaW; boardH = areaW / ar; }
   else                     { boardH = areaH; boardW = areaH * ar; }
+  boardW *= BOARD_SHRINK;
+  boardH *= BOARD_SHRINK;
 
   originX = (boardWrap.clientWidth  - boardW) / 2;
   originY = (boardWrap.clientHeight - boardH) / 2;
@@ -260,21 +265,10 @@ function computeGeometry() {
   boardTarget.style.top    = originY + 'px';
   boardTarget.style.width  = boardW  + 'px';
   boardTarget.style.height = boardH  + 'px';
-}
 
-function buildBoardTargetCells() {
-  boardTarget.innerHTML = '';
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const cell = document.createElement('div');
-      cell.className = 'cell';
-      cell.style.left   = (c * 100 / COLS) + '%';
-      cell.style.top    = (r * 100 / ROWS) + '%';
-      cell.style.width  = (100 / COLS) + '%';
-      cell.style.height = (100 / ROWS) + '%';
-      boardTarget.appendChild(cell);
-    }
-  }
+  solvedText.style.left  = originX + 'px';
+  solvedText.style.top   = (originY + boardH + 16) + 'px';
+  solvedText.style.width = boardW + 'px';
 }
 
 /* ── Jigsaw edge geometry ────────────────────────────────
@@ -347,7 +341,6 @@ function buildBoard() {
   if (!offCanvas) return;
 
   computeGeometry();
-  buildBoardTargetCells();
 
   pieces.forEach(p => p.canvas.remove());
   pieces = [];
@@ -408,27 +401,6 @@ function placeCanvasAt(piece) {
   piece.canvas.style.top  = (piece.cur.y - marginCss) + 'px';
 }
 
-/* ── Reposition on resize without rebuilding/rescattering ─ */
-function relayout() {
-  if (!offCanvas || !pieces.length) return;
-  computeGeometry();
-  applyAllSizes();
-
-  const maxX = Math.max(0, boardWrap.clientWidth  - dispW);
-  const maxY = Math.max(0, boardWrap.clientHeight - dispH);
-
-  for (const p of pieces) {
-    p.home.x = originX + p.col * dispW;
-    p.home.y = originY + p.row * dispH;
-    if (p.locked) { p.cur.x = p.home.x; p.cur.y = p.home.y; }
-    else {
-      p.cur.x = Math.min(Math.max(0, p.cur.x), maxX);
-      p.cur.y = Math.min(Math.max(0, p.cur.y), maxY);
-    }
-    placeCanvasAt(p);
-  }
-}
-
 /* ── Scatter ─────────────────────────────────────────── */
 function scatterAllPieces() {
   if (!pieces.length) return;
@@ -443,7 +415,7 @@ function scatterAllPieces() {
     placeCanvasAt(p);
   }
   solvedCount = 0;
-  solvedOverlay.classList.add('hidden');
+  solvedText.classList.remove('visible');
 }
 
 /* ── Hit-testing: pick the topmost piece that is actually
@@ -540,7 +512,7 @@ function onDragEnd(e) {
     piece.locked = true;
     piece.canvas.classList.add('locked');
     solvedCount++;
-    if (solvedCount === pieces.length) solvedOverlay.classList.remove('hidden');
+    if (solvedCount === pieces.length) solvedText.classList.add('visible');
   }
 }
 
