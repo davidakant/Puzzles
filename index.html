@@ -29,12 +29,62 @@
     width: 1180px;
     height: 820px;
     flex-shrink: 0;
+    position: relative;
   }
+
+  #home-screen, #puzzle-screen {
+    width: 100%; height: 100%;
+    display: flex; flex-direction: column;
+  }
+  #home-screen.hidden, #puzzle-screen.hidden { display: none; }
+
+  #home-screen {
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+  #home-title { font-size: 34px; font-weight: 800; letter-spacing: -0.5px; }
+  #home-subtitle { font-size: 14px; color: rgba(255,255,255,0.5); margin-bottom: 24px; }
+
+  #puzzle-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 28px;
+    justify-content: center;
+    max-width: 1000px;
+  }
+  .puzzle-card {
+    width: 220px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  .puzzle-card .thumb-wrap {
+    width: 220px;
+    height: 124px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 2px solid rgba(255,255,255,0.16);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    transition: transform 0.12s, border-color 0.12s;
+    background: #000;
+  }
+  .puzzle-card:active .thumb-wrap { transform: scale(0.96); border-color: rgba(124,106,247,0.7); }
+  .puzzle-card .thumb-wrap video {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+    pointer-events: none;
+  }
+  .puzzle-card .puzzle-name { font-size: 15px; font-weight: 600; color: #fff; }
 
   header {
     flex-shrink: 0;
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;   /* must never wrap — a 2nd line would shrink board-wrap's
+                            height mid-game and shift every piece's home position */
     align-items: center;
     gap: 14px;
     padding: 10px 16px;
@@ -49,15 +99,25 @@
   }
   button.btn:active { opacity: 0.7; }
   button.btn.accent { background: #7c6af7; border-color: transparent; }
+  button.btn.active { background: #7c6af7; border-color: transparent; }
+
+  #grid-size-group { display: flex; gap: 0; }
+  #grid-size-group .btn { border-radius: 0; }
+  #grid-size-group .btn:first-child { border-radius: 8px 0 0 8px; }
+  #grid-size-group .btn:last-child  { border-radius: 0 8px 8px 0; border-left: none; }
 
   #diag {
     font-size: 11px;
     font-family: ui-monospace, Menlo, Consolas, monospace;
     color: #9fe6a0;
-    white-space: pre;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 360px;     /* fixed cap so warning suffixes never grow the header */
     background: rgba(0,0,0,0.3);
     padding: 4px 8px;
     border-radius: 6px;
+    flex-shrink: 0;
   }
   #diag.warn { color: #ffcf4d; }
 
@@ -145,15 +205,31 @@
   <video id="source" autoplay loop muted playsinline></video>
 
   <div id="app">
-    <header>
-      <h1>Video Jigsaw</h1>
-      <button class="btn" id="reshuffle-btn">Reshuffle</button>
-      <div id="diag">starting…</div>
-    </header>
-    <div id="board-wrap">
-      <div id="board-target"></div>
-      <div id="solved-text">Solved!</div>
+
+    <div id="home-screen">
+      <h1 id="home-title">Video Jigsaw</h1>
+      <div id="home-subtitle">Choose a puzzle</div>
+      <div id="puzzle-grid"></div>
     </div>
+
+    <div id="puzzle-screen" class="hidden">
+      <header>
+        <button class="btn" id="home-btn">⌂ Home</button>
+        <h1>Video Jigsaw</h1>
+        <div id="grid-size-group">
+          <button class="btn" id="grid-3x5-btn" data-cols="5" data-rows="3">3 × 5</button>
+          <button class="btn" id="grid-4x6-btn" data-cols="6" data-rows="4">4 × 6</button>
+          <button class="btn" id="grid-5x7-btn" data-cols="7" data-rows="5">5 × 7</button>
+        </div>
+        <button class="btn" id="reshuffle-btn">Reshuffle</button>
+        <div id="diag">starting…</div>
+      </header>
+      <div id="board-wrap">
+        <div id="board-target"></div>
+        <div id="solved-text">Solved!</div>
+      </div>
+    </div>
+
   </div>
 
   <div id="start-overlay" class="overlay hidden">
@@ -166,13 +242,27 @@
 'use strict';
 
 /* ── Config ──────────────────────────────────────────── */
-const DEFAULT_VIDEO = 'kaleidoscope01.mp4';
-const COLS = 4, ROWS = 4;
+// All puzzles are expected to share the same aspect ratio (16:9, like
+// the entry below) — add more here as additional videos are generated.
+const PUZZLES = [
+  { name: 'Kaleidoscope 1', src: 'kaleidoscope01.mp4' },
+  { name: 'Kaleidoscope 2', src: 'kaleidoscope02.mp4' },
+  { name: 'Kaleidoscope 3', src: 'kaleidoscope03.mp4' },
+  { name: 'Kaleidoscope 4', src: 'kaleidoscope04.mp4' },
+];
+// "3x5"/"4x6" are expressed as ROWS x COLS (matches how the board's
+// 16:9 landscape boundary keeps individual pieces close to square —
+// COLS x ROWS would make pieces badly elongated). See grid-size buttons below.
+let COLS = 5, ROWS = 3;
 const MAX_OFFSCREEN_DIM = 1024;
 const SNAP_DIST = 20;
 
 /* ── DOM refs ────────────────────────────────────────── */
-const video        = document.getElementById('source');
+const video         = document.getElementById('source');
+const homeScreen    = document.getElementById('home-screen');
+const puzzleScreen  = document.getElementById('puzzle-screen');
+const puzzleGrid    = document.getElementById('puzzle-grid');
+const homeBtn       = document.getElementById('home-btn');
 const boardWrap     = document.getElementById('board-wrap');
 const boardTarget   = document.getElementById('board-target');
 const solvedText    = document.getElementById('solved-text');
@@ -180,6 +270,7 @@ const diagEl        = document.getElementById('diag');
 const startOverlay  = document.getElementById('start-overlay');
 const startBtn      = document.getElementById('start-btn');
 const reshuffleBtn  = document.getElementById('reshuffle-btn');
+const gridSizeBtns  = document.querySelectorAll('#grid-size-group .btn');
 
 /* ── State ───────────────────────────────────────────── */
 let offCanvas = null, offCtx = null;
@@ -195,17 +286,14 @@ let fpsFrames = 0, lastFpsTime = 0, lastDrawMs = 0, currentFps = 0, frameCount =
 
 let drag = null;          // { piece, offsetX, offsetY, pointerId }
 let zCounter = 10;
+let puzzleActive = false; // false while on the home screen — gates the render loop's per-piece work
 
-/* ── Boot ────────────────────────────────────────────── */
-video.src = DEFAULT_VIDEO;
-attachVideoLifecycle();
+/* ── Boot: build the home screen, attach the main video's lifecycle
+   listeners once (its src is only ever set when a puzzle is chosen) ── */
+buildHomeScreen();
 
-function attachVideoLifecycle() {
-  video.addEventListener('loadedmetadata', () => { buildOffscreen(); buildBoard(); });
-  video.addEventListener('canplay', tryPlay);
-  if (video.readyState >= 1) { buildOffscreen(); buildBoard(); }
-  if (video.readyState >= 3) tryPlay();
-}
+video.addEventListener('loadedmetadata', () => { buildOffscreen(); buildBoard(); });
+video.addEventListener('canplay', tryPlay);
 
 function tryPlay() {
   const p = video.play();
@@ -217,8 +305,74 @@ function tryPlay() {
 startBtn.addEventListener('click', () => video.play().then(() => startOverlay.classList.add('hidden')));
 
 reshuffleBtn.addEventListener('click', scatterAllPieces);
+homeBtn.addEventListener('click', showHome);
+
+gridSizeBtns.forEach(btn => {
+  btn.addEventListener('click', () => setGridSize(+btn.dataset.cols, +btn.dataset.rows));
+});
+
+function setGridSize(cols, rows) {
+  COLS = cols;
+  ROWS = rows;
+  gridSizeBtns.forEach(btn => {
+    btn.classList.toggle('active', +btn.dataset.cols === COLS && +btn.dataset.rows === ROWS);
+  });
+  if (!puzzleActive) return;   // just remember the choice until a puzzle is open
+  buildOffscreen();            // re-slice the already-loaded video at the new grid size
+  buildBoard();                // rebuilds pieces and scatters them fresh
+}
+setGridSize(COLS, ROWS); // reflect the default 4x4 as active in the button UI
 // No window 'resize' listener: #app is a fixed 1180x820 box (see CSS),
 // so board-wrap's dimensions never change after initial layout.
+
+/* ── Home screen ─────────────────────────────────────── */
+function buildHomeScreen() {
+  puzzleGrid.innerHTML = '';
+  for (const puzzle of PUZZLES) {
+    const card = document.createElement('div');
+    card.className = 'puzzle-card';
+
+    const thumbWrap = document.createElement('div');
+    thumbWrap.className = 'thumb-wrap';
+    const thumbVideo = document.createElement('video');
+    thumbVideo.src = puzzle.src;
+    thumbVideo.autoplay = true;
+    thumbVideo.loop = true;
+    thumbVideo.muted = true;
+    thumbVideo.playsInline = true;
+    thumbWrap.appendChild(thumbVideo);
+    puzzle._thumbVideo = thumbVideo;
+
+    const label = document.createElement('div');
+    label.className = 'puzzle-name';
+    label.textContent = puzzle.name;
+
+    card.appendChild(thumbWrap);
+    card.appendChild(label);
+    card.addEventListener('click', () => startPuzzle(puzzle));
+    puzzleGrid.appendChild(card);
+  }
+  document.body.dataset.homeReady = '1';
+}
+
+function showHome() {
+  cancelDrag();
+  puzzleActive = false;
+  video.pause();
+  puzzleScreen.classList.add('hidden');
+  homeScreen.classList.remove('hidden');
+  for (const puzzle of PUZZLES) puzzle._thumbVideo.play().catch(() => {});
+}
+
+function startPuzzle(puzzle) {
+  for (const p of PUZZLES) p._thumbVideo.pause();
+  homeScreen.classList.add('hidden');
+  puzzleScreen.classList.remove('hidden');
+  puzzleActive = true;
+
+  video.src = puzzle.src;
+  video.load();
+}
 
 /* ── Offscreen buffer (the single per-frame video grab) ─ */
 function buildOffscreen() {
@@ -493,6 +647,15 @@ function onDragMove(e) {
   placeCanvasAt(drag.piece);
 }
 
+function cancelDrag() {
+  if (!drag) return;
+  drag.piece.canvas.classList.remove('dragging');
+  document.removeEventListener('pointermove', onDragMove);
+  document.removeEventListener('pointerup', onDragEnd);
+  document.removeEventListener('pointercancel', onDragEnd);
+  drag = null;
+}
+
 function onDragEnd(e) {
   if (!drag || (e.type !== 'pointercancel' && e.pointerId !== drag.pointerId)) return;
 
@@ -518,7 +681,7 @@ function onDragEnd(e) {
 
 /* ── Render loop: ONE video grab/frame, then clip+blit per piece ── */
 function tick(now) {
-  if (offCanvas && video.readyState >= 2) {
+  if (puzzleActive && offCanvas && video.readyState >= 2) {
     const t0 = performance.now();
     offCtx.drawImage(video, 0, 0, offCanvas.width, offCanvas.height);
 
@@ -570,12 +733,14 @@ function tick(now) {
     }
   }
 
-  fpsFrames++;
-  if (now - lastFpsTime >= 500) {
-    currentFps = Math.round((fpsFrames * 1000) / (now - lastFpsTime));
-    fpsFrames = 0; lastFpsTime = now;
-    window.__fps = currentFps;
-    renderDiag();
+  if (puzzleActive) {
+    fpsFrames++;
+    if (now - lastFpsTime >= 500) {
+      currentFps = Math.round((fpsFrames * 1000) / (now - lastFpsTime));
+      fpsFrames = 0; lastFpsTime = now;
+      window.__fps = currentFps;
+      renderDiag();
+    }
   }
   requestAnimationFrame(tick);
 }
@@ -607,6 +772,7 @@ function renderDiag() {
 
 /* ── Test/debug hook ─────────────────────────────────── */
 window.__getState = () => ({
+  puzzleActive,
   solved: solvedCount,
   total: pieces.length,
   marginCss, MARGIN, pieceSrcW, pieceSrcH, dispW, dispH,
