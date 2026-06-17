@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Video Jigsaw</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0e0b1a;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; width: 100vw; height: 100vh; }
+
+  header {
+    flex-shrink: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 16px;
+    background: #181428;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  header h1 { font-size: 15px; font-weight: 700; margin-right: auto; }
+  header label {
+    font-size: 12px; color: rgba(255,255,255,0.6);
+    display: flex; align-items: center; gap: 6px;
+  }
+  input[type=file] { font-size: 12px; color: #fff; max-width: 160px; }
+  button.btn {
+    font-size: 13px; font-weight: 500; padding: 7px 14px;
+    background: #221d38; color: #fff; border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 8px; cursor: pointer;
+  }
+  button.btn:active { opacity: 0.7; }
+  button.btn.accent { background: #7c6af7; border-color: transparent; }
+
+  #diag {
+    font-size: 11px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    color: #9fe6a0;
+    white-space: pre;
+    background: rgba(0,0,0,0.3);
+    padding: 4px 8px;
+    border-radius: 6px;
+  }
+  #diag.warn { color: #ffcf4d; }
+
+  #board-wrap {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* Faint target outline showing where the solved puzzle belongs */
+  #board-target {
+    position: absolute;
+    z-index: 0;
+    outline: 2px dashed rgba(255,255,255,0.15);
+    background: rgba(255,255,255,0.02);
+    pointer-events: none;
+  }
+  #board-target .cell {
+    position: absolute;
+    outline: 1px dashed rgba(255,255,255,0.08);
+  }
+
+  canvas.piece {
+    position: absolute;
+    z-index: 1;
+    display: block;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    /* Resting-piece shadow is drawn into the canvas bitmap itself (cheap,
+       part of the per-frame raster work we already pay for). A CSS
+       drop-shadow filter on all 16 continuously-repainting canvases
+       costs ~23fps (measured: 60fps -> 37fps) because the compositor
+       recomputes the filter every frame for every element. Only the
+       single actively-dragged piece gets the (cheap, one-element) CSS
+       filter below for extra elevation feedback. */
+  }
+  canvas.piece.dragging {
+    cursor: grabbing;
+    filter: drop-shadow(0 14px 22px rgba(0,0,0,0.75));
+  }
+  canvas.piece.locked { cursor: default; }
+
+  .overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.75);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .overlay.hidden { display: none; }
+  .overlay .card {
+    background: #221d38; border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 20px; padding: 36px 48px; text-align: center;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.7);
+  }
+  .overlay .emoji { font-size: 48px; margin-bottom: 10px; }
+  .overlay h2 { font-size: 26px; margin-bottom: 20px; }
+
+  #start-overlay button.btn { font-size: 16px; padding: 12px 26px; }
+
+  /* Source video: invisible to the eye, but must stay inside the
+     viewport with non-zero size to keep decoding reliable. */
+  #source {
+    position: fixed;
+    top: 0; left: 0;
+    width: 2px; height: 2px;
+    opacity: 0;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+  <video id="source" autoplay loop muted playsinline></video>
+
+  <div id="app">
+    <header>
+      <h1>Video Jigsaw — Phase 3 (interlocking shapes)</h1>
+      <label>Load video: <input type="file" id="file-input" accept="video/*"></label>
+      <button class="btn" id="shuffle-btn">Shuffle</button>
+      <div id="diag">starting…</div>
+    </header>
+    <div id="board-wrap">
+      <div id="board-target"></div>
+    </div>
+  </div>
+
+  <div id="start-overlay" class="overlay hidden">
+    <div class="card">
+      <button class="btn accent" id="start-btn">▶ Start Video</button>
+    </div>
+  </div>
+
+  <div id="solved-overlay" class="overlay hidden">
+    <div class="card">
+      <div class="emoji">🧩</div>
+      <h2>Solved!</h2>
+      <button class="btn accent" id="shuffle-again-btn">Shuffle Again</button>
+    </div>
+  </div>
+
+<script>
+'use strict';
+
+/* ── Config ──────────────────────────────────────────── */
+const DEFAULT_VIDEO = 'kaleidoscope01.mp4';
+const COLS = 4, ROWS = 4;
+const MAX_OFFSCREEN_DIM = 1024;
+const SNAP_DIST = 20;
+
+/* ── DOM refs ────────────────────────────────────────── */
+const video        = document.getElementById('source');
+const boardWrap     = document.getElementById('board-wrap');
+const boardTarget   = document.getElementById('board-target');
+const diagEl        = document.getElementById('diag');
+const fileInput     = document.getElementById('file-input');
+const startOverlay  = document.getElementById('start-overlay');
+const startBtn      = document.getElementById('start-btn');
+const solvedOverlay = document.getElementById('solved-overlay');
+const shuffleBtn    = document.getElementById('shuffle-btn');
+const shuffleAgainBtn = document.getElementById('shuffle-again-btn');
+
+/* ── State ───────────────────────────────────────────── */
+let offCanvas = null, offCtx = null;
+let pieceSrcW = 0, pieceSrcH = 0;     // cell size in offscreen-buffer pixels
+let originX = 0, originY = 0, dispW = 0, dispH = 0;
+let KNOB = 0, MARGIN = 0;             // bitmap-pixel units, fixed once per build
+let marginCss = 0;                    // MARGIN scaled into CSS px, updates on resize
+let pieces = [];
+let pieceByCanvas = new Map();
+let solvedCount = 0;
+
+let fpsFrames = 0, lastFpsTime = 0, lastDrawMs = 0, currentFps = 0, frameCount = 0;
+
+let drag = null;          // { piece, offsetX, offsetY, pointerId }
+let zCounter = 10;
+
+/* ── Boot ────────────────────────────────────────────── */
+video.src = DEFAULT_VIDEO;
+attachVideoLifecycle();
+
+function attachVideoLifecycle() {
+  video.addEventListener('loadedmetadata', () => { buildOffscreen(); buildBoard(); });
+  video.addEventListener('canplay', tryPlay);
+  if (video.readyState >= 1) { buildOffscreen(); buildBoard(); }
+  if (video.readyState >= 3) tryPlay();
+}
+
+function tryPlay() {
+  const p = video.play();
+  if (p && typeof p.catch === 'function') {
+    p.then(() => startOverlay.classList.add('hidden'))
+     .catch(() => startOverlay.classList.remove('hidden'));
+  }
+}
+startBtn.addEventListener('click', () => video.play().then(() => startOverlay.classList.add('hidden')));
+
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  video.src = URL.createObjectURL(file);
+  video.load();
+  tryPlay();
+});
+
+shuffleBtn.addEventListener('click', scatterAllPieces);
+shuffleAgainBtn.addEventListener('click', scatterAllPieces);
+window.addEventListener('resize', relayout);
+
+/* ── Offscreen buffer (the single per-frame video grab) ─ */
+function buildOffscreen() {
+  const nativeW = video.videoWidth, nativeH = video.videoHeight;
+  if (!nativeW || !nativeH) return;
+
+  const scale = Math.min(1, MAX_OFFSCREEN_DIM / Math.max(nativeW, nativeH));
+  let w = Math.floor(nativeW * scale);
+  let h = Math.floor(nativeH * scale);
+  w -= w % COLS;
+  h -= h % ROWS;
+
+  offCanvas = document.createElement('canvas');
+  offCanvas.width = w; offCanvas.height = h;
+  offCtx = offCanvas.getContext('2d');
+
+  pieceSrcW = w / COLS;
+  pieceSrcH = h / ROWS;
+  KNOB   = Math.min(pieceSrcW, pieceSrcH) * 0.28;
+  MARGIN = KNOB * 1.6;
+}
+
+/* ── Geometry: where the target board sits inside board-wrap ─ */
+function computeGeometry() {
+  const areaW = boardWrap.clientWidth  - 40;
+  const areaH = boardWrap.clientHeight - 40;
+  const ar = offCanvas.width / offCanvas.height;
+
+  let boardW, boardH;
+  if (areaW / ar <= areaH) { boardW = areaW; boardH = areaW / ar; }
+  else                     { boardH = areaH; boardW = areaH * ar; }
+
+  originX = (boardWrap.clientWidth  - boardW) / 2;
+  originY = (boardWrap.clientHeight - boardH) / 2;
+  dispW = boardW / COLS;
+  dispH = boardH / ROWS;
+  marginCss = MARGIN * (dispW / pieceSrcW);
+
+  boardTarget.style.left   = originX + 'px';
+  boardTarget.style.top    = originY + 'px';
+  boardTarget.style.width  = boardW  + 'px';
+  boardTarget.style.height = boardH  + 'px';
+}
+
+function buildBoardTargetCells() {
+  boardTarget.innerHTML = '';
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.style.left   = (c * 100 / COLS) + '%';
+      cell.style.top    = (r * 100 / ROWS) + '%';
+      cell.style.width  = (100 / COLS) + '%';
+      cell.style.height = (100 / ROWS) + '%';
+      boardTarget.appendChild(cell);
+    }
+  }
+}
+
+/* ── Jigsaw edge geometry ────────────────────────────────
+   Canonical edge drawn left-to-right along local +x, from (0,0)
+   to (len,0). Canonical -y = "outward" (away from piece body).
+   dir: +1 = tab (bulges outward), -1 = blank (dips inward), 0 = flat.
+   Absolute points are computed by hand (rotation + translation)
+   because Path2D has no transform stack of its own. ─────────── */
+function rotatePoint(x, y, angleDeg) {
+  const r = angleDeg * Math.PI / 180;
+  const cos = Math.cos(r), sin = Math.sin(r);
+  return [x * cos - y * sin, x * sin + y * cos];
+}
+
+function addEdgeAbs(path, corner, angleDeg, len, dir, knob) {
+  const abs = (x, y) => {
+    const [dx, dy] = rotatePoint(x, y, angleDeg);
+    return [corner[0] + dx, corner[1] + dy];
+  };
+  if (dir === 0) {
+    const [ex, ey] = abs(len, 0);
+    path.lineTo(ex, ey);
+    return;
+  }
+  const a = -dir * knob;     // canonical outward = -y
+  const w = knob * 0.8;
+  const neck = len / 2;
+
+  let pt = abs(neck - w * 1.5, 0);                path.lineTo(pt[0], pt[1]);
+  let c1 = abs(neck - w * 1.5, a * 0.3);
+  let c2 = abs(neck - w,       a);
+  let e1 = abs(neck - w * 0.5, a);
+  path.bezierCurveTo(c1[0], c1[1], c2[0], c2[1], e1[0], e1[1]);
+  let c3 = abs(neck - w * 0.2, a * 1.3);
+  let c4 = abs(neck + w * 0.2, a * 1.3);
+  let e2 = abs(neck + w * 0.5, a);
+  path.bezierCurveTo(c3[0], c3[1], c4[0], c4[1], e2[0], e2[1]);
+  let c5 = abs(neck + w,       a);
+  let c6 = abs(neck + w * 1.5, a * 0.3);
+  let e3 = abs(neck + w * 1.5, 0);
+  path.bezierCurveTo(c5[0], c5[1], c6[0], c6[1], e3[0], e3[1]);
+  let pf = abs(len, 0);                           path.lineTo(pf[0], pf[1]);
+}
+
+function buildPiecePath2D(cellW, cellH, marginX, marginY, knob, topDir, rightDir, bottomDir, leftDir) {
+  const path = new Path2D();
+  const tl = [marginX, marginY];
+  const tr = [marginX + cellW, marginY];
+  const br = [marginX + cellW, marginY + cellH];
+  const bl = [marginX, marginY + cellH];
+  path.moveTo(tl[0], tl[1]);
+  addEdgeAbs(path, tl, 0,   cellW, topDir,    knob);
+  addEdgeAbs(path, tr, 90,  cellH, rightDir,  knob);
+  addEdgeAbs(path, br, 180, cellW, bottomDir, knob);
+  addEdgeAbs(path, bl, 270, cellH, leftDir,   knob);
+  path.closePath();
+  return path;
+}
+
+function generateEdgeTables() {
+  const hEdge = []; // boundary between (c,r) above and (c,r+1) below; +1 = above has the tab
+  for (let r = 0; r < ROWS - 1; r++) hEdge.push(Array.from({ length: COLS }, () => Math.random() < 0.5 ? 1 : -1));
+  const vEdge = []; // boundary between (c,r) left and (c+1,r) right; +1 = left has the tab
+  for (let r = 0; r < ROWS; r++) vEdge.push(Array.from({ length: COLS - 1 }, () => Math.random() < 0.5 ? 1 : -1));
+  return { hEdge, vEdge };
+}
+
+/* ── Build pieces (initial load / new video) ────────────── */
+function buildBoard() {
+  if (!offCanvas) return;
+
+  computeGeometry();
+  buildBoardTargetCells();
+
+  pieces.forEach(p => p.canvas.remove());
+  pieces = [];
+  pieceByCanvas.clear();
+  solvedCount = 0;
+
+  const { hEdge, vEdge } = generateEdgeTables();
+  const bitmapW = pieceSrcW + 2 * MARGIN;
+  const bitmapH = pieceSrcH + 2 * MARGIN;
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const topDir    = r === 0        ? 0 : -hEdge[r - 1][c];
+      const bottomDir  = r === ROWS - 1 ? 0 :  hEdge[r][c];
+      const rightDir   = c === COLS - 1 ? 0 :  vEdge[r][c];
+      const leftDir    = c === 0        ? 0 : -vEdge[r][c - 1];
+
+      const canvas = document.createElement('canvas');
+      canvas.className = 'piece';
+      canvas.width  = bitmapW;
+      canvas.height = bitmapH;
+      boardWrap.appendChild(canvas);
+
+      const piece = {
+        col: c, row: r,
+        sx: c * pieceSrcW, sy: r * pieceSrcH,
+        canvas, ctx: canvas.getContext('2d'),
+        path2D: buildPiecePath2D(pieceSrcW, pieceSrcH, MARGIN, MARGIN, KNOB, topDir, rightDir, bottomDir, leftDir),
+        dirs: { top: topDir, right: rightDir, bottom: bottomDir, left: leftDir },
+        home: { x: originX + c * dispW, y: originY + r * dispH },
+        cur:  { x: 0, y: 0 },
+        locked: false
+      };
+      pieceByCanvas.set(canvas, piece);
+      pieces.push(piece);
+    }
+  }
+
+  applyAllSizes();
+  scatterAllPieces();
+  canvasReadBlocked = false;
+  taintCheckPending = true;   // re-checked after the first real frame is drawn
+
+  document.body.dataset.ready = '1';
+}
+
+function applyAllSizes() {
+  const cssW = (pieceSrcW + 2 * MARGIN) * (dispW / pieceSrcW);
+  const cssH = (pieceSrcH + 2 * MARGIN) * (dispH / pieceSrcH);
+  for (const p of pieces) {
+    p.canvas.style.width  = cssW + 'px';
+    p.canvas.style.height = cssH + 'px';
+  }
+}
+
+function placeCanvasAt(piece) {
+  piece.canvas.style.left = (piece.cur.x - marginCss) + 'px';
+  piece.canvas.style.top  = (piece.cur.y - marginCss) + 'px';
+}
+
+/* ── Reposition on resize without rebuilding/rescattering ─ */
+function relayout() {
+  if (!offCanvas || !pieces.length) return;
+  computeGeometry();
+  applyAllSizes();
+
+  const maxX = Math.max(0, boardWrap.clientWidth  - dispW);
+  const maxY = Math.max(0, boardWrap.clientHeight - dispH);
+
+  for (const p of pieces) {
+    p.home.x = originX + p.col * dispW;
+    p.home.y = originY + p.row * dispH;
+    if (p.locked) { p.cur.x = p.home.x; p.cur.y = p.home.y; }
+    else {
+      p.cur.x = Math.min(Math.max(0, p.cur.x), maxX);
+      p.cur.y = Math.min(Math.max(0, p.cur.y), maxY);
+    }
+    placeCanvasAt(p);
+  }
+}
+
+/* ── Scatter ─────────────────────────────────────────── */
+function scatterAllPieces() {
+  if (!pieces.length) return;
+  const maxX = Math.max(0, boardWrap.clientWidth  - dispW);
+  const maxY = Math.max(0, boardWrap.clientHeight - dispH);
+
+  for (const p of pieces) {
+    p.cur = { x: Math.random() * maxX, y: Math.random() * maxY };
+    p.locked = false;
+    p.canvas.classList.remove('locked');
+    p.canvas.style.zIndex = 1;
+    placeCanvasAt(p);
+  }
+  solvedCount = 0;
+  solvedOverlay.classList.add('hidden');
+}
+
+/* ── Hit-testing: pick the topmost piece that is actually
+   opaque at this point (so transparent tab/blank margins
+   don't block clicks meant for a piece underneath) ────── */
+let canvasReadBlocked = false; // set true if getImageData throws (e.g. tainted canvas on file://)
+let taintCheckPending = false; // re-test right after the first real video frame is drawn
+
+function findPieceAt(clientX, clientY) {
+  const stack = document.elementsFromPoint(clientX, clientY);
+  for (const el of stack) {
+    const piece = pieceByCanvas.get(el);
+    if (!piece) continue;
+
+    if (canvasReadBlocked) return piece;   // degrade to plain topmost-element picking
+
+    const rect = el.getBoundingClientRect();
+    const px = Math.floor((clientX - rect.left) / rect.width  * piece.canvas.width);
+    const py = Math.floor((clientY - rect.top)  / rect.height * piece.canvas.height);
+    if (px < 0 || py < 0 || px >= piece.canvas.width || py >= piece.canvas.height) continue;
+    try {
+      const alpha = piece.ctx.getImageData(px, py, 1, 1).data[3];
+      if (alpha > 10) return piece;
+    } catch (err) {
+      // Canvas tainted by cross-origin data — typically happens when the
+      // page is opened via file:// instead of http(s). Fall back to
+      // picking whatever piece is topmost at this point, ignoring its
+      // transparent margin, rather than breaking dragging entirely.
+      canvasReadBlocked = true;
+      console.warn('Per-pixel hit-testing disabled (canvas tainted, likely file:// origin). ' +
+        'Serve over http(s) to restore click-through on transparent tab/blank margins. Reason:', err.message);
+      renderDiag();
+      return piece;
+    }
+  }
+  return null;
+}
+
+/* ── Drag & drop (pointer events: mouse + touch) ───────── */
+boardWrap.addEventListener('pointerdown', (e) => {
+  if (drag) return;
+  const piece = findPieceAt(e.clientX, e.clientY);
+  if (!piece || piece.locked) return;
+  e.preventDefault();
+
+  drag = {
+    piece,
+    offsetX: e.clientX - (piece.canvas.getBoundingClientRect().left + marginCss),
+    offsetY: e.clientY - (piece.canvas.getBoundingClientRect().top  + marginCss),
+    pointerId: e.pointerId
+  };
+  piece.canvas.style.zIndex = ++zCounter;
+  piece.canvas.classList.add('dragging');
+
+  document.addEventListener('pointermove', onDragMove, { passive: false });
+  document.addEventListener('pointerup', onDragEnd);
+  document.addEventListener('pointercancel', onDragEnd);
+});
+
+function onDragMove(e) {
+  if (!drag || e.pointerId !== drag.pointerId) return;
+  e.preventDefault();
+
+  const wrapRect = boardWrap.getBoundingClientRect();
+  const maxX = Math.max(0, boardWrap.clientWidth  - dispW);
+  const maxY = Math.max(0, boardWrap.clientHeight - dispH);
+
+  let x = e.clientX - wrapRect.left - drag.offsetX;
+  let y = e.clientY - wrapRect.top  - drag.offsetY;
+  x = Math.min(Math.max(0, x), maxX);
+  y = Math.min(Math.max(0, y), maxY);
+
+  drag.piece.cur.x = x;
+  drag.piece.cur.y = y;
+  placeCanvasAt(drag.piece);
+}
+
+function onDragEnd(e) {
+  if (!drag || (e.type !== 'pointercancel' && e.pointerId !== drag.pointerId)) return;
+
+  const piece = drag.piece;
+  piece.canvas.classList.remove('dragging');
+  document.removeEventListener('pointermove', onDragMove);
+  document.removeEventListener('pointerup', onDragEnd);
+  document.removeEventListener('pointercancel', onDragEnd);
+  drag = null;
+
+  const dist = Math.hypot(piece.cur.x - piece.home.x, piece.cur.y - piece.home.y);
+  if (dist <= SNAP_DIST) {
+    piece.cur.x = piece.home.x;
+    piece.cur.y = piece.home.y;
+    placeCanvasAt(piece);
+    piece.canvas.style.zIndex = 1;
+    piece.locked = true;
+    piece.canvas.classList.add('locked');
+    solvedCount++;
+    if (solvedCount === pieces.length) solvedOverlay.classList.remove('hidden');
+  }
+}
+
+/* ── Render loop: ONE video grab/frame, then clip+blit per piece ── */
+function tick(now) {
+  if (offCanvas && video.readyState >= 2) {
+    const t0 = performance.now();
+    offCtx.drawImage(video, 0, 0, offCanvas.width, offCanvas.height);
+
+    const isDragging = !!drag;
+    for (const p of pieces) {
+      const w = p.canvas.width, h = p.canvas.height;
+      p.ctx.clearRect(0, 0, w, h);
+
+      // Cheap shape-following shadow baked into the bitmap, skipped for
+      // the dragging piece (which gets the CSS filter shadow instead).
+      if (!isDragging || drag.piece !== p) {
+        p.ctx.save();
+        p.ctx.shadowColor = 'rgba(0,0,0,0.55)';
+        p.ctx.shadowBlur = 7;
+        p.ctx.shadowOffsetY = 3;
+        p.ctx.fillStyle = '#000';
+        p.ctx.fill(p.path2D);
+        p.ctx.restore();
+      }
+
+      p.ctx.save();
+      p.ctx.clip(p.path2D);
+      p.ctx.drawImage(
+        offCanvas,
+        p.sx - MARGIN, p.sy - MARGIN, w, h,
+        0, 0, w, h
+      );
+      p.ctx.restore();
+
+      p.ctx.lineWidth = 2.5;
+      p.ctx.strokeStyle = (drag && drag.piece === p) ? 'rgba(124,106,247,0.9)'
+                          : p.locked               ? 'rgba(48,209,88,0.85)'
+                          :                           'rgba(0,0,0,0.55)';
+      p.ctx.stroke(p.path2D);
+    }
+
+    lastDrawMs = performance.now() - t0;
+    frameCount++;
+    window.__frameCount = frameCount;
+
+    if (taintCheckPending) {
+      taintCheckPending = false;
+      try { pieces[0].ctx.getImageData(0, 0, 1, 1); }
+      catch (err) {
+        canvasReadBlocked = true;
+        console.warn('Per-pixel hit-testing disabled (canvas tainted, likely file:// origin). ' +
+          'Serve over http(s) to restore click-through on transparent tab/blank margins.');
+      }
+    }
+  }
+
+  fpsFrames++;
+  if (now - lastFpsTime >= 500) {
+    currentFps = Math.round((fpsFrames * 1000) / (now - lastFpsTime));
+    fpsFrames = 0; lastFpsTime = now;
+    window.__fps = currentFps;
+    renderDiag();
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+function renderDiag() {
+  const budgetMs = 16.6;
+  const native = `${video.videoWidth || 0}x${video.videoHeight || 0}`;
+  const puzzle = offCanvas ? `${offCanvas.width}x${offCanvas.height}` : '—';
+  diagEl.textContent =
+    `native ${native}  puzzle ${puzzle}  solved ${solvedCount}/${pieces.length}  ` +
+    `fps ${currentFps}  draw ${lastDrawMs.toFixed(1)}ms`;
+
+  if (canvasReadBlocked) {
+    diagEl.textContent += `  ⚠ file:// detected — serve over http(s) for precise edge click-through`;
+    diagEl.classList.add('warn');
+  }
+
+  if (currentFps > 0 && currentFps < 55) {
+    diagEl.classList.add('warn');
+    const bottleneck = lastDrawMs > budgetMs
+      ? `own draw loop too slow (${lastDrawMs.toFixed(1)}ms > ${budgetMs}ms budget)`
+      : `external (vsync/compositor/throttling) — our draw cost is only ${lastDrawMs.toFixed(1)}ms`;
+    diagEl.textContent += `  ⚠ ${bottleneck}`;
+  } else {
+    diagEl.classList.remove('warn');
+  }
+}
+
+/* ── Test/debug hook ─────────────────────────────────── */
+window.__getState = () => ({
+  solved: solvedCount,
+  total: pieces.length,
+  marginCss, MARGIN, pieceSrcW, pieceSrcH, dispW, dispH,
+  pieces: pieces.map(p => ({
+    col: p.col, row: p.row, locked: p.locked,
+    cur: { ...p.cur }, home: { ...p.home }, dirs: { ...p.dirs }
+  }))
+});
+</script>
+</body>
+</html>
