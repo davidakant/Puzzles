@@ -39,19 +39,39 @@
   #home-screen.hidden, #puzzle-screen.hidden { display: none; }
 
   #home-screen {
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
-    gap: 10px;
+    gap: 4px;
+    padding-left: 90px; /* aligns title/headers/rows to Kaleidoscope 1's left edge */
   }
-  #home-title { font-size: 34px; font-weight: 800; letter-spacing: -0.5px; }
-  #home-subtitle { font-size: 14px; color: rgba(255,255,255,0.5); margin-bottom: 24px; }
+  #home-title { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; text-align: left; }
+  #home-subtitle { font-size: 12px; color: rgba(255,255,255,0.5); margin-bottom: 10px; text-align: left; }
 
-  #puzzle-grid {
+  #puzzle-categories {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 1000px;
+  }
+  .category-section {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .category-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.55);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    text-align: left;
+  }
+  .puzzle-row {
     display: flex;
     flex-wrap: wrap;
-    gap: 28px;
-    justify-content: center;
-    max-width: 1000px;
+    gap: 24px;
+    justify-content: flex-start;
   }
   .puzzle-card {
     width: 220px;
@@ -72,9 +92,8 @@
     background: #000;
   }
   .puzzle-card:active .thumb-wrap { transform: scale(0.96); border-color: rgba(124,106,247,0.7); }
-  .puzzle-card .thumb-wrap video {
+  .puzzle-card .thumb-wrap canvas {
     width: 100%; height: 100%;
-    object-fit: cover;
     display: block;
     pointer-events: none;
   }
@@ -209,7 +228,7 @@
     <div id="home-screen">
       <h1 id="home-title">Video Jigsaw</h1>
       <div id="home-subtitle">Choose a puzzle</div>
-      <div id="puzzle-grid"></div>
+      <div id="puzzle-categories"></div>
     </div>
 
     <div id="puzzle-screen" class="hidden">
@@ -244,11 +263,22 @@
 /* ── Config ──────────────────────────────────────────── */
 // All puzzles are expected to share the same aspect ratio (16:9, like
 // the entry below) — add more here as additional videos are generated.
+// Display order on the home screen follows this array's order, grouped
+// into one row per category (first-seen order). Add new entries near
+// others sharing their category to keep rows tidy.
 const PUZZLES = [
-  { name: 'Kaleidoscope 1', src: 'kaleidoscope01.mp4' },
-  { name: 'Kaleidoscope 2', src: 'kaleidoscope02.mp4' },
-  { name: 'Kaleidoscope 3', src: 'kaleidoscope03.mp4' },
-  { name: 'Kaleidoscope 4', src: 'kaleidoscope04.mp4' },
+  { name: 'Kaleidoscope 1', src: 'kaleidoscope01.mp4', category: 'Kaleidoscopes' },
+  { name: 'Kaleidoscope 2', src: 'kaleidoscope02.mp4', category: 'Kaleidoscopes' },
+  { name: 'Kaleidoscope 3', src: 'kaleidoscope03.mp4', category: 'Kaleidoscopes' },
+  { name: 'Kaleidoscope 4', src: 'kaleidoscope04.mp4', category: 'Kaleidoscopes' },
+  { name: 'Rain Droplets', src: 'Rain Droplets01.mp4', category: 'Nature' },
+  // Source file has baked-in pillarbox bars (~62px left, ~64px right at
+  // 1280x720); crop them out and stretch the remaining content to fill
+  // the 16:9 frame so no black bars show in the puzzle or its thumbnail.
+  { name: 'Landscape', src: 'Landscape01.mp4', crop: { left: 64, right: 66, top: 0, bottom: 0 }, category: 'Nature' },
+  { name: 'Sakura Leaves', src: 'Sakura Leaves.mp4', category: 'Nature' },
+  { name: 'Snowflakes', src: 'Snowflakes.mp4', category: 'Nature' },
+  { name: 'American Flag', src: 'American Flag.mp4', category: 'Other' },
 ];
 // "3x5"/"4x6" are expressed as ROWS x COLS (matches how the board's
 // 16:9 landscape boundary keeps individual pieces close to square —
@@ -261,7 +291,7 @@ const SNAP_DIST = 20;
 const video         = document.getElementById('source');
 const homeScreen    = document.getElementById('home-screen');
 const puzzleScreen  = document.getElementById('puzzle-screen');
-const puzzleGrid    = document.getElementById('puzzle-grid');
+const puzzleCategories = document.getElementById('puzzle-categories');
 const homeBtn       = document.getElementById('home-btn');
 const boardWrap     = document.getElementById('board-wrap');
 const boardTarget   = document.getElementById('board-target');
@@ -287,6 +317,52 @@ let fpsFrames = 0, lastFpsTime = 0, lastDrawMs = 0, currentFps = 0, frameCount =
 let drag = null;          // { piece, offsetX, offsetY, pointerId }
 let zCounter = 10;
 let puzzleActive = false; // false while on the home screen — gates the render loop's per-piece work
+let activeCrop = { left: 0, right: 0, top: 0, bottom: 0 }; // per-puzzle black-bar crop, see PUZZLES
+
+function cropOf(puzzle) {
+  const c = puzzle.crop || {};
+  return { left: c.left || 0, right: c.right || 0, top: c.top || 0, bottom: c.bottom || 0 };
+}
+
+// Draws a puzzle's (crop-aware) first frame into a thumbnail canvas using a
+// throwaway <video>, briefly attached to the document since some browsers
+// only decode frames for in-DOM video elements.
+function captureFirstFrame(puzzle, canvas) {
+  const tempVideo = document.createElement('video');
+  tempVideo.muted = true;
+  tempVideo.playsInline = true;
+  tempVideo.preload = 'auto';
+  tempVideo.style.cssText = 'position:fixed;top:0;left:0;width:2px;height:2px;opacity:0;pointer-events:none;';
+
+  let captured = false;
+  let timeoutId = null;
+  function capture() {
+    if (captured) return;
+    captured = true;
+    clearTimeout(timeoutId);
+    const crop = cropOf(puzzle);
+    const sw = tempVideo.videoWidth - crop.left - crop.right;
+    const sh = tempVideo.videoHeight - crop.top - crop.bottom;
+    if (sw > 0 && sh > 0) {
+      canvas.getContext('2d').drawImage(tempVideo, crop.left, crop.top, sw, sh, 0, 0, canvas.width, canvas.height);
+    }
+    tempVideo.pause();
+    tempVideo.remove();
+  }
+
+  // 'playing' guarantees a real decoded frame; some browsers won't decode
+  // any frame at all for a video that's never been played, even muted —
+  // the same issue the main puzzle video hit, fixed the same way here.
+  tempVideo.addEventListener('playing', capture, { once: true });
+  tempVideo.addEventListener('loadeddata', () => {
+    const p = tempVideo.play();
+    if (p && typeof p.catch === 'function') p.catch(() => capture()); // autoplay blocked — use whatever frame is already decoded
+  }, { once: true });
+  timeoutId = setTimeout(capture, 4000); // safety net so a stuck video doesn't linger forever
+
+  document.body.appendChild(tempVideo);
+  tempVideo.src = puzzle.src;
+}
 
 /* ── Boot: build the home screen, attach the main video's lifecycle
    listeners once (its src is only ever set when a puzzle is chosen) ── */
@@ -327,31 +403,51 @@ setGridSize(COLS, ROWS); // reflect the default 4x4 as active in the button UI
 
 /* ── Home screen ─────────────────────────────────────── */
 function buildHomeScreen() {
-  puzzleGrid.innerHTML = '';
+  puzzleCategories.innerHTML = '';
+
+  const categories = [];
   for (const puzzle of PUZZLES) {
-    const card = document.createElement('div');
-    card.className = 'puzzle-card';
-
-    const thumbWrap = document.createElement('div');
-    thumbWrap.className = 'thumb-wrap';
-    const thumbVideo = document.createElement('video');
-    thumbVideo.src = puzzle.src;
-    thumbVideo.autoplay = true;
-    thumbVideo.loop = true;
-    thumbVideo.muted = true;
-    thumbVideo.playsInline = true;
-    thumbWrap.appendChild(thumbVideo);
-    puzzle._thumbVideo = thumbVideo;
-
-    const label = document.createElement('div');
-    label.className = 'puzzle-name';
-    label.textContent = puzzle.name;
-
-    card.appendChild(thumbWrap);
-    card.appendChild(label);
-    card.addEventListener('click', () => startPuzzle(puzzle));
-    puzzleGrid.appendChild(card);
+    if (!categories.includes(puzzle.category)) categories.push(puzzle.category);
   }
+
+  for (const categoryName of categories) {
+    const section = document.createElement('div');
+    section.className = 'category-section';
+
+    const title = document.createElement('h2');
+    title.className = 'category-title';
+    title.textContent = categoryName;
+    section.appendChild(title);
+
+    const row = document.createElement('div');
+    row.className = 'puzzle-row';
+
+    for (const puzzle of PUZZLES.filter(p => p.category === categoryName)) {
+      const card = document.createElement('div');
+      card.className = 'puzzle-card';
+
+      const thumbWrap = document.createElement('div');
+      thumbWrap.className = 'thumb-wrap';
+      const thumbCanvas = document.createElement('canvas');
+      thumbCanvas.width = 220;
+      thumbCanvas.height = 124;
+      thumbWrap.appendChild(thumbCanvas);
+      captureFirstFrame(puzzle, thumbCanvas);
+
+      const label = document.createElement('div');
+      label.className = 'puzzle-name';
+      label.textContent = puzzle.name;
+
+      card.appendChild(thumbWrap);
+      card.appendChild(label);
+      card.addEventListener('click', () => startPuzzle(puzzle));
+      row.appendChild(card);
+    }
+
+    section.appendChild(row);
+    puzzleCategories.appendChild(section);
+  }
+
   document.body.dataset.homeReady = '1';
 }
 
@@ -361,14 +457,13 @@ function showHome() {
   video.pause();
   puzzleScreen.classList.add('hidden');
   homeScreen.classList.remove('hidden');
-  for (const puzzle of PUZZLES) puzzle._thumbVideo.play().catch(() => {});
 }
 
 function startPuzzle(puzzle) {
-  for (const p of PUZZLES) p._thumbVideo.pause();
   homeScreen.classList.add('hidden');
   puzzleScreen.classList.remove('hidden');
   puzzleActive = true;
+  activeCrop = cropOf(puzzle);
 
   video.src = puzzle.src;
   video.load();
@@ -683,7 +778,13 @@ function onDragEnd(e) {
 function tick(now) {
   if (puzzleActive && offCanvas && video.readyState >= 2) {
     const t0 = performance.now();
-    offCtx.drawImage(video, 0, 0, offCanvas.width, offCanvas.height);
+    offCtx.drawImage(
+      video,
+      activeCrop.left, activeCrop.top,
+      video.videoWidth - activeCrop.left - activeCrop.right,
+      video.videoHeight - activeCrop.top - activeCrop.bottom,
+      0, 0, offCanvas.width, offCanvas.height
+    );
 
     const isDragging = !!drag;
     for (const p of pieces) {
