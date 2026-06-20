@@ -198,6 +198,7 @@
     user-select: none;
     -webkit-user-select: none;
     -webkit-tap-highlight-color: transparent;
+    transition: transform 0.15s ease;  /* only animates rotation — left/top drag movement is untouched */
     /* Resting-piece shadow is drawn into the canvas bitmap itself (cheap,
        part of the per-frame raster work we already pay for). A CSS
        drop-shadow filter on all 16 continuously-repainting canvases
@@ -648,6 +649,7 @@ function buildBoard() {
         dirs: { top: topDir, right: rightDir, bottom: bottomDir, left: leftDir },
         home: { x: originX + c * dispW, y: originY + r * dispH },
         cur:  { x: 0, y: 0 },
+        rotation: 0,
         locked: false
       };
       pieceByCanvas.set(canvas, piece);
@@ -663,12 +665,14 @@ function buildBoard() {
   document.body.dataset.ready = '1';
 }
 
+let pieceCssW = 0, pieceCssH = 0; // CSS display size of every piece canvas (unrotated)
+
 function applyAllSizes() {
-  const cssW = (pieceSrcW + 2 * MARGIN) * (dispW / pieceSrcW);
-  const cssH = (pieceSrcH + 2 * MARGIN) * (dispH / pieceSrcH);
+  pieceCssW = (pieceSrcW + 2 * MARGIN) * (dispW / pieceSrcW);
+  pieceCssH = (pieceSrcH + 2 * MARGIN) * (dispH / pieceSrcH);
   for (const p of pieces) {
-    p.canvas.style.width  = cssW + 'px';
-    p.canvas.style.height = cssH + 'px';
+    p.canvas.style.width  = pieceCssW + 'px';
+    p.canvas.style.height = pieceCssH + 'px';
   }
 }
 
@@ -677,7 +681,43 @@ function placeCanvasAt(piece) {
   piece.canvas.style.top  = (piece.cur.y - marginCss) + 'px';
 }
 
+// Rotation is a pure CSS visual effect (rotate() around the canvas's own
+// center) — it never touches cur.x/y, so drag math stays rotation-agnostic.
+// piece.rotation is deliberately left UNWRAPPED (can grow past 360, e.g.
+// 270 -> 360 -> 450 ...): if we wrapped it to 0 here, the CSS transition
+// would animate backward from 270deg down to 0deg (a 270° counter-clockwise
+// swing) instead of forward by 90° clockwise. Logic that cares about the
+// "actual" facing (snapping, hit-testing) uses effectiveRotation() below.
+function setRotation(piece, deg) {
+  piece.rotation = deg;
+  piece.canvas.style.transform = `rotate(${piece.rotation}deg)`;
+}
+
+function effectiveRotation(piece) {
+  return ((piece.rotation % 360) + 360) % 360;
+}
+
+// A piece only locks into place when it's both in the right spot AND
+// right-side up (rotation 0) — called after every drag-release and after
+// every click-rotate, so rotating the last 90° home while already
+// correctly positioned locks it immediately.
+function tryLockPiece(piece) {
+  const dist = Math.hypot(piece.cur.x - piece.home.x, piece.cur.y - piece.home.y);
+  if (dist <= SNAP_DIST && effectiveRotation(piece) === 0) {
+    piece.cur.x = piece.home.x;
+    piece.cur.y = piece.home.y;
+    placeCanvasAt(piece);
+    piece.canvas.style.zIndex = 1;
+    piece.locked = true;
+    piece.canvas.classList.add('locked');
+    solvedCount++;
+    if (solvedCount === pieces.length) solvedText.classList.add('visible');
+  }
+}
+
 /* ── Scatter ─────────────────────────────────────────── */
+const SHUFFLE_ROTATIONS = [90, 180, 270]; // never 0 — every piece starts wrong-side-up
+
 function scatterAllPieces() {
   if (!pieces.length) return;
   const maxX = Math.max(0, boardWrap.clientWidth  - dispW);
@@ -688,6 +728,7 @@ function scatterAllPieces() {
     p.locked = false;
     p.canvas.classList.remove('locked');
     p.canvas.style.zIndex = 1;
+    setRotation(p, SHUFFLE_ROTATIONS[Math.floor(Math.random() * SHUFFLE_ROTATIONS.length)]);
     placeCanvasAt(p);
   }
   solvedCount = 0;
@@ -702,15 +743,30 @@ let taintCheckPending = false; // re-test right after the first real video frame
 
 function findPieceAt(clientX, clientY) {
   const stack = document.elementsFromPoint(clientX, clientY);
+  const wrapRect = boardWrap.getBoundingClientRect();
   for (const el of stack) {
     const piece = pieceByCanvas.get(el);
     if (!piece) continue;
 
     if (canvasReadBlocked) return piece;   // degrade to plain topmost-element picking
 
-    const rect = el.getBoundingClientRect();
-    const px = Math.floor((clientX - rect.left) / rect.width  * piece.canvas.width);
-    const py = Math.floor((clientY - rect.top)  / rect.height * piece.canvas.height);
+    // CSS transform:rotate() is purely visual, so getBoundingClientRect()
+    // (which reflects the rotated box) can't be used to map back to
+    // canvas-local pixels. Use the known unrotated layout box instead and
+    // inverse-rotate the click point around its center.
+    const boxLeft = wrapRect.left + piece.cur.x - marginCss;
+    const boxTop  = wrapRect.top  + piece.cur.y - marginCss;
+    const sx = clientX - (boxLeft + pieceCssW / 2);
+    const sy = clientY - (boxTop  + pieceCssH / 2);
+    let lx, ly;
+    switch (effectiveRotation(piece)) {
+      case 90:  lx = sy;  ly = -sx; break;
+      case 180: lx = -sx; ly = -sy; break;
+      case 270: lx = -sy; ly = sx;  break;
+      default:  lx = sx;  ly = sy;
+    }
+    const px = Math.floor((pieceCssW / 2 + lx) / pieceCssW  * piece.canvas.width);
+    const py = Math.floor((pieceCssH / 2 + ly) / pieceCssH  * piece.canvas.height);
     if (px < 0 || py < 0 || px >= piece.canvas.width || py >= piece.canvas.height) continue;
     try {
       const alpha = piece.ctx.getImageData(px, py, 1, 1).data[3];
@@ -731,16 +787,22 @@ function findPieceAt(clientX, clientY) {
 }
 
 /* ── Drag & drop (pointer events: mouse + touch) ───────── */
+const CLICK_MOVE_THRESHOLD = 6; // px of pointer travel before a press counts as a drag, not a click
+
 boardWrap.addEventListener('pointerdown', (e) => {
   if (drag) return;
   const piece = findPieceAt(e.clientX, e.clientY);
   if (!piece || piece.locked) return;
   e.preventDefault();
 
+  const wrapRect = boardWrap.getBoundingClientRect();
   drag = {
     piece,
-    offsetX: e.clientX - (piece.canvas.getBoundingClientRect().left + marginCss),
-    offsetY: e.clientY - (piece.canvas.getBoundingClientRect().top  + marginCss),
+    offsetX: e.clientX - wrapRect.left - piece.cur.x,
+    offsetY: e.clientY - wrapRect.top  - piece.cur.y,
+    startClientX: e.clientX,
+    startClientY: e.clientY,
+    moved: false,
     pointerId: e.pointerId
   };
   piece.canvas.style.zIndex = ++zCounter;
@@ -754,6 +816,11 @@ boardWrap.addEventListener('pointerdown', (e) => {
 function onDragMove(e) {
   if (!drag || e.pointerId !== drag.pointerId) return;
   e.preventDefault();
+
+  if (!drag.moved) {
+    const traveled = Math.hypot(e.clientX - drag.startClientX, e.clientY - drag.startClientY);
+    if (traveled > CLICK_MOVE_THRESHOLD) drag.moved = true;
+  }
 
   const wrapRect = boardWrap.getBoundingClientRect();
   const maxX = Math.max(0, boardWrap.clientWidth  - dispW);
@@ -782,23 +849,18 @@ function onDragEnd(e) {
   if (!drag || (e.type !== 'pointercancel' && e.pointerId !== drag.pointerId)) return;
 
   const piece = drag.piece;
+  const wasClick = !drag.moved && e.type !== 'pointercancel';
   piece.canvas.classList.remove('dragging');
   document.removeEventListener('pointermove', onDragMove);
   document.removeEventListener('pointerup', onDragEnd);
   document.removeEventListener('pointercancel', onDragEnd);
   drag = null;
 
-  const dist = Math.hypot(piece.cur.x - piece.home.x, piece.cur.y - piece.home.y);
-  if (dist <= SNAP_DIST) {
-    piece.cur.x = piece.home.x;
-    piece.cur.y = piece.home.y;
-    placeCanvasAt(piece);
-    piece.canvas.style.zIndex = 1;
-    piece.locked = true;
-    piece.canvas.classList.add('locked');
-    solvedCount++;
-    if (solvedCount === pieces.length) solvedText.classList.add('visible');
-  }
+  // A tap/click (pointer never moved) rotates 90° clockwise instead of
+  // being treated as a (no-op) drop.
+  if (wasClick) setRotation(piece, piece.rotation + 90);
+
+  tryLockPiece(piece);
 }
 
 /* ── Render loop: ONE video grab/frame, then clip+blit per piece ── */
@@ -904,11 +966,14 @@ window.__getState = () => ({
   solved: solvedCount,
   total: pieces.length,
   marginCss, MARGIN, pieceSrcW, pieceSrcH, dispW, dispH,
+  pieceCssW, pieceCssH,
   pieces: pieces.map(p => ({
-    col: p.col, row: p.row, locked: p.locked,
+    col: p.col, row: p.row, locked: p.locked, rotation: p.rotation, effRotation: effectiveRotation(p),
     cur: { ...p.cur }, home: { ...p.home }, dirs: { ...p.dirs }
   }))
 });
+window.__testSetRotation = (index, deg) => setRotation(pieces[index], deg);
+window.__testTryLock = (index) => tryLockPiece(pieces[index]);
 </script>
 </body>
 </html>
