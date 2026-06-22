@@ -64,12 +64,23 @@
     gap: 6px;
   }
   .category-title {
+    display: flex;
+    align-items: center;   /* vertically centers the line on the label's letters */
+    gap: 14px;
+    align-self: stretch;   /* span the section's full width, regardless of how
+                               many cards are in this particular row, so every
+                               divider line reaches the same right edge */
     font-size: 14px;
     font-weight: 700;
     color: rgba(255,255,255,0.55);
     text-transform: uppercase;
     letter-spacing: 1px;
     text-align: left;
+  }
+  .category-title-line {
+    flex: 1;
+    height: 1px;
+    background: rgba(255,255,255,0.18);
   }
   .puzzle-row {
     display: flex;
@@ -188,7 +199,7 @@
     font-weight: 700;
     color: #30d158;
     opacity: 0;
-    transition: opacity 0.4s ease;
+    transition: opacity 0.4s ease, top 2s ease, left 2s ease, width 2s ease;
     pointer-events: none;
   }
   #solved-text.visible { opacity: 1; }
@@ -203,18 +214,14 @@
     -webkit-user-select: none;
     -webkit-tap-highlight-color: transparent;
     transition: transform 0.15s ease;  /* only animates rotation — left/top drag movement is untouched */
-    /* Resting-piece shadow is drawn into the canvas bitmap itself (cheap,
-       part of the per-frame raster work we already pay for). A CSS
-       drop-shadow filter on all 16 continuously-repainting canvases
-       costs ~23fps (measured: 60fps -> 37fps) because the compositor
-       recomputes the filter every frame for every element. Only the
-       single actively-dragged piece gets the (cheap, one-element) CSS
-       filter below for extra elevation feedback. */
+    /* Shadow is always drawn into the canvas bitmap itself (cheap, part of
+       the per-frame raster work we already pay for) rather than via a CSS
+       drop-shadow filter — dragging now can move an entire connected group
+       (up to ~48 pieces), and a CSS filter on that many simultaneously-
+       repainting canvases reintroduces the exact perf regression measured
+       earlier (~23fps lost with filters on all pieces at once). */
   }
-  canvas.piece.dragging {
-    cursor: grabbing;
-    filter: drop-shadow(0 14px 22px rgba(0,0,0,0.75));
-  }
+  canvas.piece.dragging { cursor: grabbing; }
   canvas.piece.locked { cursor: default; }
 
   .overlay {
@@ -264,9 +271,10 @@
         <div id="current-puzzle-name"></div>
         <div class="header-right">
           <div id="grid-size-group">
-            <button class="btn" id="grid-3x5-btn" data-cols="5" data-rows="3">3 × 5</button>
-            <button class="btn" id="grid-4x6-btn" data-cols="6" data-rows="4">4 × 6</button>
-            <button class="btn" id="grid-5x7-btn" data-cols="7" data-rows="5">5 × 7</button>
+            <button class="btn" id="grid-3x5-btn" data-cols="5" data-rows="3">15 pcs</button>
+            <button class="btn" id="grid-4x6-btn" data-cols="6" data-rows="4">24 pcs</button>
+            <button class="btn" id="grid-5x7-btn" data-cols="7" data-rows="5">35 pcs</button>
+            <button class="btn" id="grid-6x8-btn" data-cols="8" data-rows="6">48 pcs</button>
           </div>
           <button class="btn" id="reshuffle-btn">Reshuffle</button>
           <div id="diag">starting…</div>
@@ -307,7 +315,15 @@ const PUZZLES = [
   { name: 'Landscape', src: 'Landscape01.mp4', crop: { left: 64, right: 66, top: 0, bottom: 0 }, category: 'Nature' },
   { name: 'Sakura Leaves', src: 'Sakura Leaves.mp4', category: 'Nature' },
   { name: 'Snowflakes', src: 'Snowflakes.mp4', category: 'Nature' },
-  { name: 'American Flag', src: 'American Flag.mp4', category: 'Other' },
+  { name: 'Koi Pond', src: 'gemini_generated_video_22841747.mp4', category: 'Nature' },
+  { name: 'Honeybees', src: 'gemini_generated_video_60F8A2ED.mp4', category: 'Nature' },
+  { name: 'Water Ripples', src: 'gemini_generated_video_779A42DA.mp4', category: 'Nature' },
+  { name: 'Sunflowers', src: 'Sunflowers.mp4', category: 'Nature' },
+  { name: 'American Flag', src: 'American Flag.mp4', category: 'Holidays' },
+  { name: 'Candy Hearts', src: 'Candy Hearts.mp4', category: 'Holidays' },
+  { name: 'Surfing Dog', src: 'Surfing Dog.mp4', category: 'Animals' },
+  { name: 'Bichon Frise Puppies', src: 'Bichon Frise Puppies.mp4', category: 'Animals' },
+  { name: 'Strawberries and Cream', src: 'Strawberris and Cream.mp4', category: 'Food' },
 ];
 // "3x5"/"4x6" are expressed as ROWS x COLS (matches how the board's
 // 16:9 landscape boundary keeps individual pieces close to square —
@@ -315,6 +331,13 @@ const PUZZLES = [
 let COLS = 5, ROWS = 3;
 const MAX_OFFSCREEN_DIM = 1024;
 const SNAP_DIST = 20;
+
+// Win celebration: the locked-stroke fades to nothing over SOLVED_FADE_MS,
+// and the whole assembled puzzle scales up around its own center.
+const SOLVED_FADE_MS = 2000;
+const SOLVED_SCALE = 1.66;
+let isSolved = false;
+let solvedAt = null; // performance.now() timestamp of the moment it became solved
 
 /* ── DOM refs ────────────────────────────────────────── */
 const video         = document.getElementById('source');
@@ -340,7 +363,7 @@ let KNOB = 0, MARGIN = 0;             // bitmap-pixel units, fixed once per buil
 let marginCss = 0;                    // MARGIN scaled into CSS px, updates on resize
 let pieces = [];
 let pieceByCanvas = new Map();
-let solvedCount = 0;
+let groupIdCounter = 0; // every group (even a lone piece) gets a unique id
 
 let fpsFrames = 0, lastFpsTime = 0, lastDrawMs = 0, currentFps = 0, frameCount = 0;
 
@@ -348,6 +371,101 @@ let drag = null;          // { piece, offsetX, offsetY, pointerId }
 let zCounter = 10;
 let puzzleActive = false; // false while on the home screen — gates the render loop's per-piece work
 let activeCrop = { left: 0, right: 0, top: 0, bottom: 0 }; // per-puzzle black-bar crop, see PUZZLES
+let currentPuzzle = null;       // the PUZZLES entry currently open, for save/restore lookup
+let currentHEdge = null, currentVEdge = null; // edge tables behind the current board's jigsaw shapes
+let pendingRestore = null;      // saved-state payload to apply on the next buildBoard(), if any
+
+/* ── Save / restore (localStorage) ─────────────────────
+   Persists enough to reconstruct the exact same board on reload: which
+   puzzle, grid size, the jigsaw edge tables (so piece SHAPES match, not
+   just positions), every GROUP's position/rotation/locked state, and
+   which group each piece currently belongs to. ── */
+const SAVE_KEY = 'videoJigsawSave';
+
+function saveState() {
+  if (!puzzleActive || !currentPuzzle || !pieces.length) return;
+  const groupList = [...new Set(pieces.map(p => p.group))];
+  const groupIndex = new Map(groupList.map((g, i) => [g, i]));
+  const data = {
+    screen: 'puzzle',
+    puzzleSrc: currentPuzzle.src,
+    cols: COLS, rows: ROWS,
+    hEdge: currentHEdge, vEdge: currentVEdge,
+    groups: groupList.map(g => ({ anchorX: g.anchorX, anchorY: g.anchorY, locked: g.locked })),
+    pieces: pieces.map(p => ({ rotation: p.rotation, groupIdx: groupIndex.get(p.group) })),
+  };
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); }
+  catch (err) { console.warn('Could not save game state:', err.message); }
+}
+
+function saveHomeMarker() {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify({ screen: 'home' })); }
+  catch (err) { console.warn('Could not save game state:', err.message); }
+}
+
+function loadSavedState() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.warn('Could not read saved game state:', err.message);
+    return null;
+  }
+}
+
+// Validates the payload, then kicks off the normal startPuzzle() flow with
+// pendingRestore set so buildBoard() reuses the saved shapes/positions
+// instead of generating a fresh random layout. Old (pre-group) save
+// payloads lack `.groups` and are safely rejected here.
+function resumeFromSave(saved) {
+  if (!saved || saved.screen !== 'puzzle') return false;
+  const puzzle = PUZZLES.find(p => p.src === saved.puzzleSrc);
+  if (!puzzle) return false;
+  if (!Number.isInteger(saved.cols) || !Number.isInteger(saved.rows)) return false;
+  const total = saved.cols * saved.rows;
+  if (!Array.isArray(saved.pieces) || saved.pieces.length !== total) return false;
+  if (!Array.isArray(saved.hEdge) || !Array.isArray(saved.vEdge)) return false;
+  if (!Array.isArray(saved.groups) || !saved.groups.length) return false;
+  if (!saved.pieces.every(p => Number.isInteger(p.groupIdx) && p.groupIdx >= 0 && p.groupIdx < saved.groups.length)) return false;
+
+  COLS = saved.cols;
+  ROWS = saved.rows;
+  pendingRestore = saved;
+  startPuzzle(puzzle);
+  gridSizeBtns.forEach(btn => {
+    btn.classList.toggle('active', +btn.dataset.cols === COLS && +btn.dataset.rows === ROWS);
+  });
+  return true;
+}
+
+// Rebuilds groups from saved data instead of scattering fresh singleton
+// groups — used by buildBoard() when resuming from a save.
+function restorePieceStates(saved) {
+  const groups = saved.groups.map(g => ({
+    id: ++groupIdCounter, pieces: [], anchorX: g.anchorX, anchorY: g.anchorY, locked: !!g.locked
+  }));
+  for (let i = 0; i < pieces.length; i++) {
+    const p = pieces[i];
+    const sp = saved.pieces[i];
+    const g = groups[sp.groupIdx];
+    p.group = g;
+    p.rotation = sp.rotation;
+    g.pieces.push(p);
+  }
+  for (const g of groups) {
+    const anchor = g.pieces[0];
+    for (const p of g.pieces) {
+      p.localDx = p.home.x - anchor.home.x;
+      p.localDy = p.home.y - anchor.home.y;
+      p.canvas.style.transform = `rotate(${p.rotation}deg)`;
+      p.canvas.classList.toggle('locked', g.locked);
+      p.canvas.style.zIndex = g.locked ? 0 : 1; // locked pieces sit behind everything unsolved
+    }
+    updateGroupPivot(g);
+    for (const p of g.pieces) placeCanvasAt(p);
+  }
+  updateWinState();
+}
 
 function cropOf(puzzle) {
   const c = puzzle.crop || {};
@@ -397,6 +515,9 @@ function captureFirstFrame(puzzle, canvas) {
 /* ── Boot: build the home screen, attach the main video's lifecycle
    listeners once (its src is only ever set when a puzzle is chosen) ── */
 buildHomeScreen();
+setGridSize(COLS, ROWS); // reflect the default grid size as active in the button UI;
+                         // puzzleActive is still false here, so this can't trigger a build
+resumeFromSave(loadSavedState()); // overrides the above if there's a valid save to resume
 
 video.addEventListener('loadedmetadata', () => { buildOffscreen(); buildBoard(); });
 video.addEventListener('canplay', tryPlay);
@@ -427,7 +548,6 @@ function setGridSize(cols, rows) {
   buildOffscreen();            // re-slice the already-loaded video at the new grid size
   buildBoard();                // rebuilds pieces and scatters them fresh
 }
-setGridSize(COLS, ROWS); // reflect the default 4x4 as active in the button UI
 // No window 'resize' listener: #app is a fixed 1180x820 box (see CSS),
 // so board-wrap's dimensions never change after initial layout.
 
@@ -439,6 +559,7 @@ function buildHomeScreen() {
   for (const puzzle of PUZZLES) {
     if (!categories.includes(puzzle.category)) categories.push(puzzle.category);
   }
+  categories.sort((a, b) => a.localeCompare(b)); // sections in ascending alphabetical order
 
   for (const categoryName of categories) {
     const section = document.createElement('div');
@@ -446,13 +567,21 @@ function buildHomeScreen() {
 
     const title = document.createElement('h2');
     title.className = 'category-title';
-    title.textContent = categoryName;
+    const titleLabel = document.createElement('span');
+    titleLabel.className = 'category-title-label';
+    titleLabel.textContent = categoryName;
+    const titleLine = document.createElement('span');
+    titleLine.className = 'category-title-line';
+    title.appendChild(titleLabel);
+    title.appendChild(titleLine);
     section.appendChild(title);
 
     const row = document.createElement('div');
     row.className = 'puzzle-row';
 
-    for (const puzzle of PUZZLES.filter(p => p.category === categoryName)) {
+    const puzzlesInCategory = PUZZLES.filter(p => p.category === categoryName)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const puzzle of puzzlesInCategory) {
       const card = document.createElement('div');
       card.className = 'puzzle-card';
 
@@ -488,12 +617,14 @@ function showHome() {
   puzzleScreen.classList.add('hidden');
   homeScreen.classList.remove('hidden');
   currentPuzzleNameEl.textContent = '';
+  saveHomeMarker();
 }
 
 function startPuzzle(puzzle) {
   homeScreen.classList.add('hidden');
   puzzleScreen.classList.remove('hidden');
   puzzleActive = true;
+  currentPuzzle = puzzle;
   activeCrop = cropOf(puzzle);
   currentPuzzleNameEl.textContent = puzzle.name;
 
@@ -626,9 +757,13 @@ function buildBoard() {
   pieces.forEach(p => p.canvas.remove());
   pieces = [];
   pieceByCanvas.clear();
-  solvedCount = 0;
 
-  const { hEdge, vEdge } = generateEdgeTables();
+  const restore = pendingRestore;
+  pendingRestore = null;
+
+  const { hEdge, vEdge } = restore ? { hEdge: restore.hEdge, vEdge: restore.vEdge } : generateEdgeTables();
+  currentHEdge = hEdge;
+  currentVEdge = vEdge;
   const bitmapW = pieceSrcW + 2 * MARGIN;
   const bitmapH = pieceSrcH + 2 * MARGIN;
 
@@ -652,9 +787,10 @@ function buildBoard() {
         path2D: buildPiecePath2D(pieceSrcW, pieceSrcH, MARGIN, MARGIN, KNOB, topDir, rightDir, bottomDir, leftDir),
         dirs: { top: topDir, right: rightDir, bottom: bottomDir, left: leftDir },
         home: { x: originX + c * dispW, y: originY + r * dispH },
-        cur:  { x: 0, y: 0 },
+        isCorner: (c === 0 || c === COLS - 1) && (r === 0 || r === ROWS - 1),
         rotation: 0,
-        locked: false
+        localDx: 0, localDy: 0, // fixed offset from this piece's group anchor; set on group/merge
+        group: null             // assigned below by restorePieceStates() or scatterAllPieces()
       };
       pieceByCanvas.set(canvas, piece);
       pieces.push(piece);
@@ -662,11 +798,18 @@ function buildBoard() {
   }
 
   applyAllSizes();
-  scatterAllPieces();
+
+  if (restore && restore.pieces.length === pieces.length) {
+    restorePieceStates(restore);
+  } else {
+    scatterAllPieces();
+  }
+
   canvasReadBlocked = false;
   taintCheckPending = true;   // re-checked after the first real frame is drawn
 
   document.body.dataset.ready = '1';
+  saveState();
 }
 
 let pieceCssW = 0, pieceCssH = 0; // CSS display size of every piece canvas (unrotated)
@@ -680,43 +823,217 @@ function applyAllSizes() {
   }
 }
 
-function placeCanvasAt(piece) {
-  piece.canvas.style.left = (piece.cur.x - marginCss) + 'px';
-  piece.canvas.style.top  = (piece.cur.y - marginCss) + 'px';
-}
+/* ── Groups ──────────────────────────────────────────────
+   A "group" is a rigid cluster of one or more pieces that move and rotate
+   together. Every piece always belongs to exactly one group (even a lone,
+   unconnected piece is a group of one). Group state lives on the group
+   object (anchorX/anchorY/locked); each piece keeps its OWN rotation
+   value (never overwritten to an unrelated number — only ever shifted by
+   the same delta as its groupmates) plus a fixed localDx/localDy offset
+   from its group's anchor (pieces[0]), derived from the immutable `home`
+   geometry. A piece's actual on-screen position/orientation is always
+   DERIVED from these, never stored redundantly. ────────────────────── */
 
-// Rotation is a pure CSS visual effect (rotate() around the canvas's own
-// center) — it never touches cur.x/y, so drag math stays rotation-agnostic.
-// piece.rotation is deliberately left UNWRAPPED (can grow past 360, e.g.
-// 270 -> 360 -> 450 ...): if we wrapped it to 0 here, the CSS transition
-// would animate backward from 270deg down to 0deg (a 270° counter-clockwise
-// swing) instead of forward by 90° clockwise. Logic that cares about the
-// "actual" facing (snapping, hit-testing) uses effectiveRotation() below.
-function setRotation(piece, deg) {
-  piece.rotation = deg;
-  piece.canvas.style.transform = `rotate(${piece.rotation}deg)`;
+function rotateVec(x, y, deg) {
+  const rad = deg * Math.PI / 180;
+  const cos = Math.cos(rad), sin = Math.sin(rad);
+  return [x * cos - y * sin, x * sin + y * cos];
 }
 
 function effectiveRotation(piece) {
   return ((piece.rotation % 360) + 360) % 360;
 }
 
-// A piece only locks into place when it's both in the right spot AND
-// right-side up (rotation 0) — called after every drag-release and after
-// every click-rotate, so rotating the last 90° home while already
-// correctly positioned locks it immediately.
-function tryLockPiece(piece) {
-  const dist = Math.hypot(piece.cur.x - piece.home.x, piece.cur.y - piece.home.y);
-  if (dist <= SNAP_DIST && effectiveRotation(piece) === 0) {
-    piece.cur.x = piece.home.x;
-    piece.cur.y = piece.home.y;
-    placeCanvasAt(piece);
-    piece.canvas.style.zIndex = 1;
-    piece.locked = true;
-    piece.canvas.classList.add('locked');
-    solvedCount++;
-    if (solvedCount === pieces.length) solvedText.classList.add('visible');
+// Where the piece actually, visually sits/faces right now — used for all
+// LOGICAL geometry (alignment checks, hit-testing, corner-to-home distance).
+function pieceAbsolutePos(piece) {
+  const [rx, ry] = rotateVec(piece.localDx, piece.localDy, piece.rotation);
+  return { x: piece.group.anchorX + rx, y: piece.group.anchorY + ry };
+}
+
+// Where the piece's CSS box sits if the group were at rotation 0 — this is
+// what left/top are actually set to. Rotation is applied entirely via
+// transform + a per-piece transform-origin pointing at the group's shared
+// pivot (see updateGroupPivot), so left/top never need to change just
+// because the group rotated — only because it was DRAGGED. That's what
+// lets native CSS rotation animate the whole group as one rigid piece
+// instead of each canvas spinning around its own center independently.
+function unrotatedPos(piece) {
+  return { x: piece.group.anchorX + piece.localDx, y: piece.group.anchorY + piece.localDy };
+}
+
+function placeCanvasAt(piece) {
+  const pos = unrotatedPos(piece);
+  piece.canvas.style.left = (pos.x - marginCss) + 'px';
+  piece.canvas.style.top  = (pos.y - marginCss) + 'px';
+}
+
+// Recomputes the group's rotation pivot — the bounding-box center of all
+// member pieces' cells in their canonical (unrotated) layout — and points
+// every member's transform-origin at it. For a lone piece this reduces
+// exactly to 50%/50% (its own center), matching the prior single-piece
+// behavior; for a multi-piece group, every member now orbits the SAME
+// shared point, so rotating any one of them rotates the whole cluster
+// rigidly. Must be re-run whenever group membership changes (merges),
+// since the bounding box — and thus the pivot — shifts.
+function updateGroupPivot(group) {
+  let minX = 0, minY = 0, maxX = dispW, maxY = dispH;
+  for (const p of group.pieces) {
+    minX = Math.min(minX, p.localDx);     minY = Math.min(minY, p.localDy);
+    maxX = Math.max(maxX, p.localDx + dispW); maxY = Math.max(maxY, p.localDy + dispH);
   }
+  const centerOffsetX = (minX + maxX) / 2;
+  const centerOffsetY = (minY + maxY) / 2;
+  for (const p of group.pieces) {
+    const originX = marginCss + centerOffsetX - p.localDx;
+    const originY = marginCss + centerOffsetY - p.localDy;
+    p.canvas.style.transformOrigin = `${originX}px ${originY}px`;
+  }
+}
+
+function areGridAdjacent(p1, p2) {
+  const dc = p1.col - p2.col, dr = p1.row - p2.row;
+  return (Math.abs(dc) === 1 && dr === 0) || (dc === 0 && Math.abs(dr) === 1);
+}
+
+function getGridNeighbors(piece) {
+  return pieces.filter(p => areGridAdjacent(p, piece));
+}
+
+// Two grid-adjacent pieces are ready to connect when their groups share
+// the same effective rotation AND their current relative position matches
+// the solved layout's relative offset (rotated into the group's current
+// orientation) within SNAP_DIST.
+function piecesAligned(p1, p2) {
+  if (p1.group === p2.group) return false;
+  if (effectiveRotation(p1) !== effectiveRotation(p2)) return false;
+
+  const [edx, edy] = rotateVec((p2.col - p1.col) * dispW, (p2.row - p1.row) * dispH, p1.rotation);
+  const pos1 = pieceAbsolutePos(p1);
+  const pos2 = pieceAbsolutePos(p2);
+  const actualDx = pos2.x - pos1.x;
+  const actualDy = pos2.y - pos1.y;
+
+  return Math.hypot(actualDx - edx, actualDy - edy) <= SNAP_DIST;
+}
+
+// Absorbs `absorb`'s pieces into `keep` (preferring to keep a locked
+// group's frame authoritative). Re-derives the absorbed pieces' offsets
+// from their immutable home geometry, so the connection becomes exactly
+// precise — never left at whatever approximate spot the drag left it.
+function mergeGroups(keep, absorb) {
+  if (keep === absorb) return keep;
+  if (absorb.locked && !keep.locked) { const t = keep; keep = absorb; absorb = t; }
+
+  const anchor = keep.pieces[0];
+  for (const p of absorb.pieces) {
+    p.group = keep;
+    p.localDx = p.home.x - anchor.home.x;
+    p.localDy = p.home.y - anchor.home.y;
+    keep.pieces.push(p);
+  }
+  if (absorb.locked) keep.locked = true;
+  updateGroupPivot(keep); // bounding box just grew — every member's pivot shifts, not just the absorbed ones
+  for (const p of keep.pieces) {
+    if (keep.locked) {
+      p.canvas.classList.add('locked');
+      p.canvas.style.zIndex = 0; // behind every unsolved piece, even pieces just newly absorbed into a locked group
+    }
+    placeCanvasAt(p);
+  }
+  return keep;
+}
+
+// Repeatedly absorbs any grid-adjacent, alignment-ready neighboring group
+// until no more connections are found, then checks whether a corner in
+// the resulting group can now snap to the board.
+function checkConnections(group) {
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (const p of group.pieces) {
+      for (const n of getGridNeighbors(p)) {
+        if (n.group !== group && piecesAligned(p, n)) {
+          group = mergeGroups(group, n.group);
+          merged = true;
+          break;
+        }
+      }
+      if (merged) break;
+    }
+  }
+  checkCornerSnap(group);
+  // Unconditional: a group can already be locked (anchored earlier) and
+  // still only NOW satisfy "every piece is in this one locked group" by
+  // absorbing the rest via pure piece-to-piece merges above — that's not
+  // a fresh corner-snap event, so checkCornerSnap() alone won't catch it.
+  updateWinState();
+}
+
+// Only the 4 corner pieces ever snap to the absolute board grid — every
+// other piece can only ever connect to its neighbors. Snapping a corner
+// locks the WHOLE group permanently in place (it's now anchored to the
+// board frame, so dragging/rotating it again would misplace everything
+// already correctly connected to it).
+function checkCornerSnap(group) {
+  if (group.locked) return;
+  for (const p of group.pieces) {
+    if (!p.isCorner || effectiveRotation(p) !== 0) continue;
+    const pos = pieceAbsolutePos(p);
+    const dist = Math.hypot(pos.x - p.home.x, pos.y - p.home.y);
+    if (dist > SNAP_DIST) continue;
+
+    group.anchorX += (p.home.x - pos.x);
+    group.anchorY += (p.home.y - pos.y);
+    // No rotation change here: every piece in a group always shares the
+    // same EFFECTIVE rotation by construction (that's required for any
+    // two pieces to connect in the first place), so the whole group is
+    // already visually upright — touching .rotation would only risk an
+    // unwanted spin for members whose literal (but equivalent) value
+    // differs from this corner's.
+    group.locked = true;
+    for (const m of group.pieces) {
+      m.canvas.classList.add('locked');
+      m.canvas.style.zIndex = 0; // behind every unsolved piece, so it never blocks grabbing one
+      placeCanvasAt(m);
+    }
+    return; // checkConnections() calls updateWinState() once, unconditionally, after this returns
+  }
+}
+
+function updateWinState() {
+  const solved = pieces.length > 0 && pieces[0].group.locked && pieces.every(p => p.group === pieces[0].group);
+  solvedText.classList.toggle('visible', solved);
+
+  if (solved && !isSolved) {
+    // Just now completed: kick off the reveal. The green stroke's fade is
+    // handled per-frame in tick() (it's drawn into the canvas bitmap, not
+    // a CSS-stylable element); the scale-up is a real CSS transition —
+    // override the normal quick 0.15s rotation transition with a slower
+    // one just for this, since these pieces are locked and will never
+    // need the snappy version again.
+    solvedAt = performance.now();
+    for (const p of pieces) {
+      p.canvas.style.transition = `transform ${SOLVED_FADE_MS}ms ease`;
+      p.canvas.style.transform = `rotate(${p.rotation}deg) scale(${SOLVED_SCALE})`;
+    }
+    // The puzzle is about to grow around its own center — move the label
+    // to sit below the new, larger bottom edge instead of being covered
+    // by it. (computeGeometry() resets this back to the un-grown position
+    // whenever a board is freshly built.) Pieces' canvases extend marginCss
+    // past the strict cell grid (room for tabs to poke outward), so the
+    // true bottom edge — before scaling — is boardH/2 + marginCss below
+    // the board's center, not just boardH/2.
+    const boardW = dispW * COLS, boardH = dispH * ROWS;
+    const grownW = boardW * SOLVED_SCALE + marginCss * 2 * SOLVED_SCALE;
+    const grownBottom = originY + boardH / 2 + (boardH / 2 + marginCss) * SOLVED_SCALE;
+    solvedText.style.left  = (originX + (boardW - grownW) / 2) + 'px';
+    solvedText.style.width = grownW + 'px';
+    solvedText.style.top   = (grownBottom + 16) + 'px';
+  } else if (!solved) {
+    solvedAt = null;
+  }
+  isSolved = solved;
 }
 
 /* ── Scatter ─────────────────────────────────────────── */
@@ -727,16 +1044,21 @@ function scatterAllPieces() {
   const maxX = Math.max(0, boardWrap.clientWidth  - dispW);
   const maxY = Math.max(0, boardWrap.clientHeight - dispH);
 
+  isSolved = false;
+  solvedAt = null;
   for (const p of pieces) {
-    p.cur = { x: Math.random() * maxX, y: Math.random() * maxY };
-    p.locked = false;
+    p.group = { id: ++groupIdCounter, pieces: [p], anchorX: Math.random() * maxX, anchorY: Math.random() * maxY, locked: false };
+    p.localDx = 0; p.localDy = 0;
+    p.rotation = SHUFFLE_ROTATIONS[Math.floor(Math.random() * SHUFFLE_ROTATIONS.length)];
+    p.canvas.style.transition = ''; // undo the slow win-reveal override, if any — back to the default 0.15s
+    p.canvas.style.transform = `rotate(${p.rotation}deg)`;
     p.canvas.classList.remove('locked');
     p.canvas.style.zIndex = 1;
-    setRotation(p, SHUFFLE_ROTATIONS[Math.floor(Math.random() * SHUFFLE_ROTATIONS.length)]);
+    updateGroupPivot(p.group);
     placeCanvasAt(p);
   }
-  solvedCount = 0;
   solvedText.classList.remove('visible');
+  saveState();
 }
 
 /* ── Hit-testing: pick the topmost piece that is actually
@@ -758,8 +1080,9 @@ function findPieceAt(clientX, clientY) {
     // (which reflects the rotated box) can't be used to map back to
     // canvas-local pixels. Use the known unrotated layout box instead and
     // inverse-rotate the click point around its center.
-    const boxLeft = wrapRect.left + piece.cur.x - marginCss;
-    const boxTop  = wrapRect.top  + piece.cur.y - marginCss;
+    const pos = pieceAbsolutePos(piece);
+    const boxLeft = wrapRect.left + pos.x - marginCss;
+    const boxTop  = wrapRect.top  + pos.y - marginCss;
     const sx = clientX - (boxLeft + pieceCssW / 2);
     const sy = clientY - (boxTop  + pieceCssH / 2);
     let lx, ly;
@@ -796,26 +1119,44 @@ const CLICK_MOVE_THRESHOLD = 6; // px of pointer travel before a press counts as
 boardWrap.addEventListener('pointerdown', (e) => {
   if (drag) return;
   const piece = findPieceAt(e.clientX, e.clientY);
-  if (!piece || piece.locked) return;
+  if (!piece || piece.group.locked) return;
   e.preventDefault();
 
+  const group = piece.group;
   const wrapRect = boardWrap.getBoundingClientRect();
   drag = {
-    piece,
-    offsetX: e.clientX - wrapRect.left - piece.cur.x,
-    offsetY: e.clientY - wrapRect.top  - piece.cur.y,
+    group,
+    offsetX: e.clientX - wrapRect.left - group.anchorX,
+    offsetY: e.clientY - wrapRect.top  - group.anchorY,
+    bounds: getGroupBounds(group), // computed once; group membership can't change mid-drag
     startClientX: e.clientX,
     startClientY: e.clientY,
     moved: false,
     pointerId: e.pointerId
   };
-  piece.canvas.style.zIndex = ++zCounter;
-  piece.canvas.classList.add('dragging');
+  zCounter++;
+  for (const p of group.pieces) {
+    p.canvas.style.zIndex = zCounter;
+    p.canvas.classList.add('dragging');
+  }
 
   document.addEventListener('pointermove', onDragMove, { passive: false });
   document.addEventListener('pointerup', onDragEnd);
   document.addEventListener('pointercancel', onDragEnd);
 });
+
+// Bounding box of every member piece's current (rotated) offset from the
+// group's anchor — used to keep the WHOLE group roughly within board-wrap
+// while dragging, regardless of how many pieces it has or how it's rotated.
+function getGroupBounds(group) {
+  let minX = 0, minY = 0, maxX = dispW, maxY = dispH;
+  for (const p of group.pieces) {
+    const [rx, ry] = rotateVec(p.localDx, p.localDy, p.rotation);
+    minX = Math.min(minX, rx); minY = Math.min(minY, ry);
+    maxX = Math.max(maxX, rx + dispW); maxY = Math.max(maxY, ry + dispH);
+  }
+  return { minX, minY, maxX, maxY };
+}
 
 function onDragMove(e) {
   if (!drag || e.pointerId !== drag.pointerId) return;
@@ -827,22 +1168,23 @@ function onDragMove(e) {
   }
 
   const wrapRect = boardWrap.getBoundingClientRect();
-  const maxX = Math.max(0, boardWrap.clientWidth  - dispW);
-  const maxY = Math.max(0, boardWrap.clientHeight - dispH);
+  const b = drag.bounds;
+  const minAnchorX = -b.minX, maxAnchorX = Math.max(minAnchorX, boardWrap.clientWidth  - b.maxX);
+  const minAnchorY = -b.minY, maxAnchorY = Math.max(minAnchorY, boardWrap.clientHeight - b.maxY);
 
   let x = e.clientX - wrapRect.left - drag.offsetX;
   let y = e.clientY - wrapRect.top  - drag.offsetY;
-  x = Math.min(Math.max(0, x), maxX);
-  y = Math.min(Math.max(0, y), maxY);
+  x = Math.min(Math.max(minAnchorX, x), maxAnchorX);
+  y = Math.min(Math.max(minAnchorY, y), maxAnchorY);
 
-  drag.piece.cur.x = x;
-  drag.piece.cur.y = y;
-  placeCanvasAt(drag.piece);
+  drag.group.anchorX = x;
+  drag.group.anchorY = y;
+  for (const p of drag.group.pieces) placeCanvasAt(p);
 }
 
 function cancelDrag() {
   if (!drag) return;
-  drag.piece.canvas.classList.remove('dragging');
+  for (const p of drag.group.pieces) p.canvas.classList.remove('dragging');
   document.removeEventListener('pointermove', onDragMove);
   document.removeEventListener('pointerup', onDragEnd);
   document.removeEventListener('pointercancel', onDragEnd);
@@ -852,19 +1194,28 @@ function cancelDrag() {
 function onDragEnd(e) {
   if (!drag || (e.type !== 'pointercancel' && e.pointerId !== drag.pointerId)) return;
 
-  const piece = drag.piece;
+  const group = drag.group;
   const wasClick = !drag.moved && e.type !== 'pointercancel';
-  piece.canvas.classList.remove('dragging');
+  for (const p of group.pieces) p.canvas.classList.remove('dragging');
   document.removeEventListener('pointermove', onDragMove);
   document.removeEventListener('pointerup', onDragEnd);
   document.removeEventListener('pointercancel', onDragEnd);
   drag = null;
 
-  // A tap/click (pointer never moved) rotates 90° clockwise instead of
-  // being treated as a (no-op) drop.
-  if (wasClick) setRotation(piece, piece.rotation + 90);
+  // A tap/click (pointer never moved) rotates the whole group 90° clockwise
+  // around its shared pivot (see updateGroupPivot) instead of being treated
+  // as a (no-op) drop. left/top never change here — only transform — so
+  // CSS animates the whole rigid cluster as one piece, not each canvas
+  // spinning around its own center independently.
+  if (wasClick) {
+    for (const p of group.pieces) {
+      p.rotation += 90;
+      p.canvas.style.transform = `rotate(${p.rotation}deg)`;
+    }
+  }
 
-  tryLockPiece(piece);
+  checkConnections(group);
+  saveState();
 }
 
 /* ── Render loop: ONE video grab/frame, then clip+blit per piece ── */
@@ -879,22 +1230,19 @@ function tick(now) {
       0, 0, offCanvas.width, offCanvas.height
     );
 
-    const isDragging = !!drag;
     for (const p of pieces) {
       const w = p.canvas.width, h = p.canvas.height;
       p.ctx.clearRect(0, 0, w, h);
 
-      // Cheap shape-following shadow baked into the bitmap, skipped for
-      // the dragging piece (which gets the CSS filter shadow instead).
-      if (!isDragging || drag.piece !== p) {
-        p.ctx.save();
-        p.ctx.shadowColor = 'rgba(0,0,0,0.55)';
-        p.ctx.shadowBlur = 7;
-        p.ctx.shadowOffsetY = 3;
-        p.ctx.fillStyle = '#000';
-        p.ctx.fill(p.path2D);
-        p.ctx.restore();
-      }
+      // Cheap shape-following shadow baked into the bitmap (see CSS
+      // comment on canvas.piece for why this isn't a CSS filter).
+      p.ctx.save();
+      p.ctx.shadowColor = 'rgba(0,0,0,0.55)';
+      p.ctx.shadowBlur = 7;
+      p.ctx.shadowOffsetY = 3;
+      p.ctx.fillStyle = '#000';
+      p.ctx.fill(p.path2D);
+      p.ctx.restore();
 
       p.ctx.save();
       p.ctx.clip(p.path2D);
@@ -906,10 +1254,20 @@ function tick(now) {
       p.ctx.restore();
 
       p.ctx.lineWidth = 2.5;
-      p.ctx.strokeStyle = (drag && drag.piece === p) ? 'rgba(124,106,247,0.9)'
-                          : p.locked               ? 'rgba(48,209,88,0.85)'
-                          :                           'rgba(0,0,0,0.55)';
-      p.ctx.stroke(p.path2D);
+      let strokeStyle = null; // null means "fully faded, don't draw"
+      if (drag && p.group === drag.group) {
+        strokeStyle = 'rgba(124,106,247,0.9)';
+      } else if (p.group.locked) {
+        let alpha = 0.85;
+        if (solvedAt !== null) alpha *= Math.max(0, 1 - (now - solvedAt) / SOLVED_FADE_MS);
+        if (alpha > 0.003) strokeStyle = `rgba(48,209,88,${alpha})`;
+      } else {
+        strokeStyle = 'rgba(0,0,0,0.55)';
+      }
+      if (strokeStyle) {
+        p.ctx.strokeStyle = strokeStyle;
+        p.ctx.stroke(p.path2D);
+      }
     }
 
     lastDrawMs = performance.now() - t0;
@@ -944,8 +1302,9 @@ function renderDiag() {
   const budgetMs = 16.6;
   const native = `${video.videoWidth || 0}x${video.videoHeight || 0}`;
   const puzzle = offCanvas ? `${offCanvas.width}x${offCanvas.height}` : '—';
+  const groupCount = pieces.length ? new Set(pieces.map(p => p.group)).size : 0;
   diagEl.textContent =
-    `native ${native}  puzzle ${puzzle}  solved ${solvedCount}/${pieces.length}  ` +
+    `native ${native}  puzzle ${puzzle}  groups ${groupCount}/${pieces.length}  ` +
     `fps ${currentFps}  draw ${lastDrawMs.toFixed(1)}ms`;
 
   if (canvasReadBlocked) {
@@ -967,17 +1326,36 @@ function renderDiag() {
 /* ── Test/debug hook ─────────────────────────────────── */
 window.__getState = () => ({
   puzzleActive,
-  solved: solvedCount,
   total: pieces.length,
+  groupCount: pieces.length ? new Set(pieces.map(p => p.group)).size : 0,
+  solved: pieces.length > 0 && pieces[0].group.locked && pieces.every(p => p.group === pieces[0].group),
+  isSolved, solvedAt,
+  expectedFadeAlpha: solvedAt === null ? null : Math.max(0, 1 - (performance.now() - solvedAt) / SOLVED_FADE_MS) * 0.85,
   marginCss, MARGIN, pieceSrcW, pieceSrcH, dispW, dispH,
   pieceCssW, pieceCssH,
   pieces: pieces.map(p => ({
-    col: p.col, row: p.row, locked: p.locked, rotation: p.rotation, effRotation: effectiveRotation(p),
-    cur: { ...p.cur }, home: { ...p.home }, dirs: { ...p.dirs }
+    col: p.col, row: p.row, isCorner: p.isCorner,
+    groupId: p.group.id, locked: p.group.locked,
+    rotation: p.rotation, effRotation: effectiveRotation(p),
+    cur: pieceAbsolutePos(p), home: { ...p.home }, dirs: { ...p.dirs }
   }))
 });
-window.__testSetRotation = (index, deg) => setRotation(pieces[index], deg);
-window.__testTryLock = (index) => tryLockPiece(pieces[index]);
+window.__testSetRotation = (index, deg) => {
+  const p = pieces[index];
+  const delta = deg - p.rotation;
+  for (const m of p.group.pieces) {
+    m.rotation += delta;
+    m.canvas.style.transform = `rotate(${m.rotation}deg)`;
+    placeCanvasAt(m);
+  }
+};
+window.__testSetPos = (index, x, y) => {
+  const p = pieces[index];
+  p.group.anchorX = x - p.localDx;
+  p.group.anchorY = y - p.localDy;
+  for (const m of p.group.pieces) placeCanvasAt(m);
+};
+window.__testCheckConnections = (index) => checkConnections(pieces[index].group);
 </script>
 </body>
 </html>
