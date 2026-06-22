@@ -116,9 +116,8 @@
 
   header {
     flex-shrink: 0;
-    display: grid;
-    grid-template-columns: 1fr auto 1fr;  /* center column stays truly centered
-                                              regardless of left/right content width */
+    display: flex;
+    justify-content: space-between;
     align-items: center;
     gap: 14px;
     padding: 10px 16px;
@@ -132,11 +131,7 @@
     white-space: nowrap;  /* must never wrap — a 2nd line would shrink board-wrap's
                               height mid-game and shift every piece's home position */
   }
-  .header-left  { justify-self: start; }
-  .header-right { justify-self: end; }
-  header h1 { font-size: 15px; font-weight: 700; }
   #current-puzzle-name {
-    justify-self: center;
     font-size: 22px;
     font-weight: 800;
     color: #fff;
@@ -150,6 +145,7 @@
     border-radius: 8px; cursor: pointer;
   }
   button.btn:active { opacity: 0.7; }
+  button.btn:disabled { opacity: 0.4; cursor: default; }
   button.btn.accent { background: #7c6af7; border-color: transparent; }
   button.btn.active { background: #7c6af7; border-color: transparent; }
 
@@ -188,6 +184,22 @@
     outline: 2px dashed rgba(255,255,255,0.15);
     background: rgba(255,255,255,0.02);
     pointer-events: none;
+  }
+
+  /* Red dotted outline revealing a hinted piece's true home location.
+     Always shown well above every piece (see ++zCounter in showHint). */
+  #hint-canvas {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+  }
+  #hint-canvas.visible { display: block; }
+
+  .hint-overlay-text {
+    font-size: 15px;
+    line-height: 1.5;
+    margin-bottom: 20px;
+    max-width: 260px;
   }
 
   /* Solved message printed below the puzzle boundary (no blocking modal) */
@@ -266,9 +278,8 @@
       <header>
         <div class="header-left">
           <button class="btn" id="home-btn">⌂ Home</button>
-          <h1>Video Jigsaw</h1>
+          <div id="current-puzzle-name"></div>
         </div>
-        <div id="current-puzzle-name"></div>
         <div class="header-right">
           <div id="grid-size-group">
             <button class="btn" id="grid-3x5-btn" data-cols="5" data-rows="3">15 pcs</button>
@@ -276,6 +287,7 @@
             <button class="btn" id="grid-5x7-btn" data-cols="7" data-rows="5">35 pcs</button>
             <button class="btn" id="grid-6x8-btn" data-cols="8" data-rows="6">48 pcs</button>
           </div>
+          <button class="btn" id="hint-btn">Hint</button>
           <button class="btn" id="reshuffle-btn">Reshuffle</button>
           <div id="diag">starting…</div>
         </div>
@@ -283,6 +295,7 @@
       <div id="board-wrap">
         <div id="board-target"></div>
         <div id="solved-text">Solved!</div>
+        <canvas id="hint-canvas"></canvas>
       </div>
     </div>
 
@@ -291,6 +304,13 @@
   <div id="start-overlay" class="overlay hidden">
     <div class="card">
       <button class="btn accent" id="start-btn">▶ Start Video</button>
+    </div>
+  </div>
+
+  <div id="hint-overlay" class="overlay hidden">
+    <div class="card">
+      <p class="hint-overlay-text">Click any piece to reveal its location.</p>
+      <button class="btn accent" id="hint-overlay-ok">OK</button>
     </div>
   </div>
 
@@ -354,6 +374,11 @@ const startOverlay  = document.getElementById('start-overlay');
 const startBtn      = document.getElementById('start-btn');
 const reshuffleBtn  = document.getElementById('reshuffle-btn');
 const gridSizeBtns  = document.querySelectorAll('#grid-size-group .btn');
+const hintBtn       = document.getElementById('hint-btn');
+const hintCanvas    = document.getElementById('hint-canvas');
+const hintCtx       = hintCanvas.getContext('2d');
+const hintOverlay   = document.getElementById('hint-overlay');
+const hintOverlayOk = document.getElementById('hint-overlay-ok');
 
 /* ── State ───────────────────────────────────────────── */
 let offCanvas = null, offCtx = null;
@@ -369,6 +394,8 @@ let fpsFrames = 0, lastFpsTime = 0, lastDrawMs = 0, currentFps = 0, frameCount =
 
 let drag = null;          // { piece, offsetX, offsetY, pointerId }
 let zCounter = 10;
+let hintArmed = false;    // true while waiting for the player to select a piece to hint
+let hintPiece = null;     // the piece currently shown via the red dotted outline, or null
 let puzzleActive = false; // false while on the home screen — gates the render loop's per-piece work
 let activeCrop = { left: 0, right: 0, top: 0, bottom: 0 }; // per-puzzle black-bar crop, see PUZZLES
 let currentPuzzle = null;       // the PUZZLES entry currently open, for save/restore lookup
@@ -612,6 +639,8 @@ function buildHomeScreen() {
 
 function showHome() {
   cancelDrag();
+  hideHint();
+  disarmHint();
   puzzleActive = false;
   video.pause();
   puzzleScreen.classList.add('hidden');
@@ -753,6 +782,8 @@ function buildBoard() {
   if (!offCanvas) return;
 
   computeGeometry();
+  hideHint();
+  disarmHint();
 
   pieces.forEach(p => p.canvas.remove());
   pieces = [];
@@ -1034,6 +1065,10 @@ function updateWinState() {
     solvedAt = null;
   }
   isSolved = solved;
+
+  // No unsolved pieces left to hint at once the whole board is one locked group.
+  hintBtn.disabled = solved;
+  if (solved) { disarmHint(); hideHint(); }
 }
 
 /* ── Scatter ─────────────────────────────────────────── */
@@ -1044,6 +1079,9 @@ function scatterAllPieces() {
   const maxX = Math.max(0, boardWrap.clientWidth  - dispW);
   const maxY = Math.max(0, boardWrap.clientHeight - dispH);
 
+  hideHint();
+  disarmHint();
+  hintBtn.disabled = false;
   isSolved = false;
   solvedAt = null;
   for (const p of pieces) {
@@ -1113,14 +1151,101 @@ function findPieceAt(clientX, clientY) {
   return null;
 }
 
+/* ── Hints ───────────────────────────────────────────────
+   "Hint" arms a one-shot selection mode (button highlighted) instead of
+   showing anything immediately. The next click on an unsolved piece reveals
+   that piece's own jigsaw silhouette (its real Path2D, not a generic box),
+   drawn as a red dashed outline at its true home cell — letting the player
+   match the shape/edges without auto-placing it for them. The outline stays
+   up across normal pointer moves and stays correct even while the board is
+   panned/zoomed-by-nothing, since #board-wrap never resizes (see comment at
+   setGridSize). It's cleared the moment the player grabs any piece to drag,
+   per the request that it persist only until the next "grab". ──────── */
+const HINT_SEEN_KEY = 'videoJigsawHintSeen';
+
+function hasSeenHintIntro(puzzle) {
+  try {
+    const seen = JSON.parse(localStorage.getItem(HINT_SEEN_KEY) || '[]');
+    return seen.includes(puzzle.src);
+  } catch { return false; }
+}
+function markHintIntroSeen(puzzle) {
+  try {
+    const seen = JSON.parse(localStorage.getItem(HINT_SEEN_KEY) || '[]');
+    if (!seen.includes(puzzle.src)) {
+      seen.push(puzzle.src);
+      localStorage.setItem(HINT_SEEN_KEY, JSON.stringify(seen));
+    }
+  } catch (err) { console.warn('Could not save hint-intro state:', err.message); }
+}
+
+function showHint(piece) {
+  hintPiece = piece;
+  const bitmapW = pieceSrcW + 2 * MARGIN;
+  const bitmapH = pieceSrcH + 2 * MARGIN;
+  hintCanvas.width  = bitmapW;
+  hintCanvas.height = bitmapH;
+  hintCanvas.style.width  = pieceCssW + 'px';
+  hintCanvas.style.height = pieceCssH + 'px';
+  hintCanvas.style.left = (piece.home.x - marginCss) + 'px';
+  hintCanvas.style.top  = (piece.home.y - marginCss) + 'px';
+  hintCanvas.style.zIndex = ++zCounter; // always above every piece shown so far, locked or not
+  hintCanvas.classList.add('visible');
+
+  hintCtx.clearRect(0, 0, bitmapW, bitmapH);
+  hintCtx.save();
+  hintCtx.setLineDash([10, 7]);
+  hintCtx.lineWidth = 3.5;
+  hintCtx.strokeStyle = '#ff3b30';
+  hintCtx.stroke(piece.path2D);
+  hintCtx.restore();
+}
+
+function hideHint() {
+  hintPiece = null;
+  hintCanvas.classList.remove('visible');
+}
+
+function disarmHint() {
+  hintArmed = false;
+  hintBtn.classList.remove('active');
+}
+
+hintBtn.addEventListener('click', () => {
+  if (hintArmed) { disarmHint(); return; } // clicking again while waiting cancels
+  hideHint();
+  hintArmed = true;
+  hintBtn.classList.add('active');
+  if (currentPuzzle && !hasSeenHintIntro(currentPuzzle)) {
+    markHintIntroSeen(currentPuzzle);
+    hintOverlay.classList.remove('hidden');
+  }
+});
+hintOverlayOk.addEventListener('click', () => hintOverlay.classList.add('hidden'));
+
 /* ── Drag & drop (pointer events: mouse + touch) ───────── */
 const CLICK_MOVE_THRESHOLD = 6; // px of pointer travel before a press counts as a drag, not a click
 
 boardWrap.addEventListener('pointerdown', (e) => {
   if (drag) return;
   const piece = findPieceAt(e.clientX, e.clientY);
+
+  if (hintArmed) {
+    // Selection mode: the next valid (unsolved) piece picked consumes the
+    // arming and reveals its hint, WITHOUT starting a drag or the usual
+    // click-to-rotate — clicks on locked pieces or empty space don't count,
+    // so the button stays armed and waiting.
+    if (piece && !piece.group.locked) {
+      e.preventDefault();
+      disarmHint();
+      showHint(piece);
+    }
+    return;
+  }
+
   if (!piece || piece.group.locked) return;
   e.preventDefault();
+  hideHint(); // grabbing any piece clears a previously-shown hint
 
   const group = piece.group;
   const wrapRect = boardWrap.getBoundingClientRect();
@@ -1331,6 +1456,7 @@ window.__getState = () => ({
   solved: pieces.length > 0 && pieces[0].group.locked && pieces.every(p => p.group === pieces[0].group),
   isSolved, solvedAt,
   expectedFadeAlpha: solvedAt === null ? null : Math.max(0, 1 - (performance.now() - solvedAt) / SOLVED_FADE_MS) * 0.85,
+  hintArmed, hintPieceIndex: hintPiece ? pieces.indexOf(hintPiece) : null,
   marginCss, MARGIN, pieceSrcW, pieceSrcH, dispW, dispH,
   pieceCssW, pieceCssH,
   pieces: pieces.map(p => ({
