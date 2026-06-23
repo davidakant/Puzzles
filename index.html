@@ -59,16 +59,63 @@
      independent of puzzle-categories below, which is centered instead. */
   #home-subtitle { flex-shrink: 0; font-size: 12px; color: rgba(255,255,255,0.5); margin: 0 0 10px 90px; text-align: left; }
 
-  #puzzle-categories {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+  #puzzle-scroll-wrap {
+    position: relative;
     width: 1090px;       /* same width as before — just re-centered, not stretched/inset */
     align-self: center;  /* center within the ribbon's full width instead of sitting at the left inset */
     flex: 1;
-    min-height: 0;      /* lets this shrink below content size so it scrolls instead of overflowing */
+    min-height: 0;
+  }
+  #puzzle-categories {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
     overflow-y: auto;
     padding: 0 20px 30px 0; /* small right gutter before the ribbon's edge; bottom breathing room */
+  }
+
+  /* Scroll affordances: iPad's overlay scrollbar gives no persistent hint
+     that there's more content, so a faded edge + one-time bouncing chevron
+     stand in for it. Both only ever show when the list actually overflows. */
+  #scroll-fade-top, #scroll-fade-bottom {
+    position: absolute;
+    left: 0; right: 0;
+    height: 36px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    z-index: 2;
+  }
+  #scroll-fade-top {
+    top: 0;
+    background: linear-gradient(to bottom, #0e0b1a 0%, rgba(14,11,26,0) 100%);
+  }
+  #scroll-fade-bottom {
+    bottom: 0;
+    background: linear-gradient(to top, #0e0b1a 0%, rgba(14,11,26,0) 100%);
+  }
+  #scroll-fade-top.visible, #scroll-fade-bottom.visible { opacity: 1; }
+
+  #scroll-chevron {
+    position: absolute;
+    bottom: 6px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 22px;
+    line-height: 1;
+    color: rgba(255,255,255,0.6);
+    pointer-events: none;
+    z-index: 3;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    animation: scroll-chevron-bounce 1.6s ease-in-out infinite;
+  }
+  #scroll-chevron.visible { opacity: 1; }
+  @keyframes scroll-chevron-bounce {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50%      { transform: translateX(-50%) translateY(6px); }
   }
   .category-section {
     display: flex;
@@ -291,7 +338,12 @@
       </header>
       <div id="home-content">
         <div id="home-subtitle">Choose a puzzle</div>
-        <div id="puzzle-categories"></div>
+        <div id="puzzle-scroll-wrap">
+          <div id="puzzle-categories"></div>
+          <div id="scroll-fade-top"></div>
+          <div id="scroll-fade-bottom"></div>
+          <div id="scroll-chevron">⌄</div>
+        </div>
       </div>
     </div>
 
@@ -385,6 +437,9 @@ const video         = document.getElementById('source');
 const homeScreen    = document.getElementById('home-screen');
 const puzzleScreen  = document.getElementById('puzzle-screen');
 const puzzleCategories = document.getElementById('puzzle-categories');
+const scrollFadeTop    = document.getElementById('scroll-fade-top');
+const scrollFadeBottom = document.getElementById('scroll-fade-bottom');
+const scrollChevron    = document.getElementById('scroll-chevron');
 const homeBtn       = document.getElementById('home-btn');
 const currentPuzzleNameEl = document.getElementById('current-puzzle-name');
 const boardWrap     = document.getElementById('board-wrap');
@@ -417,6 +472,7 @@ let drag = null;          // { piece, offsetX, offsetY, pointerId }
 let zCounter = 10;
 let hintArmed = false;    // true while waiting for the player to select a piece to hint
 let hintPiece = null;     // the piece currently shown via the red dotted outline, or null
+let chevronDismissed = false; // true once the home screen's scroll-hint chevron has been dismissed
 let puzzleActive = false; // false while on the home screen — gates the render loop's per-piece work
 let activeCrop = { left: 0, right: 0, top: 0, bottom: 0 }; // per-puzzle black-bar crop, see PUZZLES
 let currentPuzzle = null;       // the PUZZLES entry currently open, for save/restore lookup
@@ -655,8 +711,29 @@ function buildHomeScreen() {
     puzzleCategories.appendChild(section);
   }
 
+  updateScrollIndicators();
   document.body.dataset.homeReady = '1';
 }
+
+// Fade + one-time bouncing chevron stand in for iPad's overlay scrollbar,
+// which gives no persistent hint that the puzzle list has more rows below.
+// Both only ever appear when the list actually overflows; the chevron
+// dismisses itself permanently on the first scroll (in either direction).
+function updateScrollIndicators() {
+  const el = puzzleCategories;
+  const overflowing = el.scrollHeight > el.clientHeight + 1;
+  const atTop = el.scrollTop <= 0;
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+
+  scrollFadeTop.classList.toggle('visible', overflowing && !atTop);
+  scrollFadeBottom.classList.toggle('visible', overflowing && !atBottom);
+  scrollChevron.classList.toggle('visible', overflowing && !chevronDismissed);
+}
+
+puzzleCategories.addEventListener('scroll', () => {
+  if (!chevronDismissed && puzzleCategories.scrollTop > 0) chevronDismissed = true;
+  updateScrollIndicators();
+});
 
 function showHome() {
   cancelDrag();
