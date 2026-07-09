@@ -313,6 +313,54 @@
 
   #start-overlay button.btn { font-size: 16px; padding: 12px 26px; }
 
+  /* Round "?" instructions button in the puzzle ribbon */
+  #help-btn {
+    font-size: 15px; font-weight: 700; line-height: 1;
+    width: 32px; height: 32px; padding: 0;
+    border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+
+  /* Instructions modal (.overlay .help-card beats .overlay .card's centering).
+     Flex column so the title, close button and "Got it" stay pinned while only
+     the body scrolls on short screens. */
+  .overlay .help-card {
+    position: relative;
+    max-width: 460px;
+    max-height: 82vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    text-align: left;
+    padding: 30px 34px;
+  }
+  .help-title {
+    flex-shrink: 0;
+    font-size: 20px; font-weight: 800; text-transform: uppercase;
+    letter-spacing: 1px; text-align: center; margin-bottom: 18px;
+  }
+  .help-body {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    font-size: 14.5px; line-height: 1.6; color: #d8d5e8; text-align: left;
+  }
+  .help-body p { margin-bottom: 12px; }
+  .help-body p:last-child { margin-bottom: 0; }
+  .help-body ul { list-style: none; margin: 0 0 14px; padding: 0; }
+  .help-body li { margin-bottom: 10px; }
+  .help-body strong { color: #fff; font-weight: 700; }
+  .help-tools-heading { margin-top: 4px; }
+  #help-overlay .btn.accent {
+    flex-shrink: 0;
+    display: block; margin: 20px auto 0; font-size: 15px; padding: 10px 26px;
+  }
+  .help-close {
+    position: absolute; top: 12px; right: 12px;
+    width: 30px; height: 30px; padding: 0; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 13px; line-height: 1;
+  }
+
   /* Source video: invisible to the eye, but must stay inside the
      viewport with non-zero size to keep decoding reliable. */
   #source {
@@ -362,6 +410,7 @@
           </div>
           <button class="btn" id="hint-btn">Hint</button>
           <button class="btn" id="reshuffle-btn">Reshuffle</button>
+          <button class="btn" id="help-btn" aria-label="How to play" title="How to play">?</button>
           <div id="diag">starting…</div>
         </div>
       </header>
@@ -384,6 +433,42 @@
     <div class="card">
       <p class="hint-overlay-text">Click any piece to reveal its location.</p>
       <button class="btn accent" id="hint-overlay-ok">OK</button>
+    </div>
+  </div>
+
+  <div id="help-overlay" class="overlay hidden">
+    <div class="card help-card">
+      <button class="btn help-close" id="help-close" aria-label="Close instructions">✕</button>
+      <h2 class="help-title">How to Play</h2>
+      <div class="help-body">
+        <p>Each piece is a live slice of the same looping video. Reassemble them
+           into the complete moving picture on the faint dashed outline.</p>
+        <ul>
+          <li><strong>Drag</strong> a piece to move it. Pieces that are already
+              joined move together as one group.</li>
+          <li><strong>Tap</strong> a piece (a quick press without dragging) to
+              rotate it 90°. Pieces start at random angles, so you'll need to
+              match the orientation as well as the position.</li>
+          <li><strong>Connect</strong> two pieces by dragging one next to its
+              correct neighbor at the matching angle — they snap together with a
+              click and from then on move and rotate as a single group.</li>
+          <li><strong>Solve it</strong> by fitting every piece onto the dashed
+              outline. When the whole picture is assembled it locks into place
+              and celebrates.</li>
+        </ul>
+        <p class="help-tools-heading"><strong>Toolbar</strong></p>
+        <ul>
+          <li><strong>15 / 24 / 35 / 48 pcs</strong> — choose how many pieces.
+              More pieces means a harder puzzle; switching restarts the puzzle.</li>
+          <li><strong>Hint</strong> — then tap any piece to reveal where it
+              belongs on the board.</li>
+          <li><strong>Reshuffle</strong> — scatter all the pieces and start the
+              current puzzle over.</li>
+        </ul>
+        <p>Your progress is saved automatically — you can leave a puzzle and
+           come back to it right where you left off.</p>
+      </div>
+      <button class="btn accent" id="help-ok">Got it</button>
     </div>
   </div>
 
@@ -468,6 +553,10 @@ const hintCanvas    = document.getElementById('hint-canvas');
 const hintCtx       = hintCanvas.getContext('2d');
 const hintOverlay   = document.getElementById('hint-overlay');
 const hintOverlayOk = document.getElementById('hint-overlay-ok');
+const helpBtn       = document.getElementById('help-btn');
+const helpOverlay   = document.getElementById('help-overlay');
+const helpClose     = document.getElementById('help-close');
+const helpOk        = document.getElementById('help-ok');
 
 /* ── State ───────────────────────────────────────────── */
 let offCanvas = null, offCtx = null;
@@ -1333,6 +1422,19 @@ hintBtn.addEventListener('click', () => {
   }
 });
 hintOverlayOk.addEventListener('click', () => hintOverlay.classList.add('hidden'));
+
+/* Instructions overlay. It's a plain modal layered over the puzzle — the board
+   underneath is untouched, so closing it returns to exactly the prior state. */
+function closeHelp() { helpOverlay.classList.add('hidden'); }
+helpBtn.addEventListener('click', () => helpOverlay.classList.remove('hidden'));
+helpOk.addEventListener('click', closeHelp);
+helpClose.addEventListener('click', closeHelp);
+// Click the dark backdrop (outside the card) to dismiss.
+helpOverlay.addEventListener('click', (e) => { if (e.target === helpOverlay) closeHelp(); });
+// Escape also closes it.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !helpOverlay.classList.contains('hidden')) closeHelp();
+});
 
 /* ── Drag & drop (pointer events: mouse + touch) ───────── */
 const CLICK_MOVE_THRESHOLD = 6; // px of pointer travel before a press counts as a drag, not a click
