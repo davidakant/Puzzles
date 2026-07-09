@@ -1,12 +1,8 @@
-# Netlify config for Video Jigsaw.
-# index.html is pre-built (minified + obfuscated from index.src.html) and
-# committed, so Netlify serves it directly — no build step needed.
+# Netlify config for Video Jigsaw (GitHub continuous deployment).
+#
+# On each push Netlify: installs deps, rebuilds index.html from index.src.html
+# (minify + obfuscate), then stages only the deployable files into _site/ so
+# node_modules and the readable source are never published.
 [build]
-  command = "echo 'Serving prebuilt index.html'"
-  publish = "."
-
-# Don't serve the readable source from the live domain.
-[[redirects]]
-  from = "/index.src.html"
-  to = "/index.html"
-  status = 404
+  command = "npm run build && rm -rf _site && mkdir _site && cp index.html *.mp4 _site/"
+  publish = "_site"
