@@ -1,10 +1,11 @@
-# Netlify build/deploy config for Video Jigsaw.
-# The site is a single static index.html generated from index.src.html.
+# Netlify config for Video Jigsaw.
+# index.html is pre-built (minified + obfuscated from index.src.html) and
+# committed, so Netlify serves it directly — no build step needed.
 [build]
-  command = "npm run build"
+  command = "echo 'Serving prebuilt index.html'"
   publish = "."
 
-# Never serve the readable source of the app (keeps the obfuscation meaningful).
+# Don't serve the readable source from the live domain.
 [[redirects]]
   from = "/index.src.html"
   to = "/index.html"
