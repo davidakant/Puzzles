@@ -1,0 +1,13 @@
+{
+  "name": "video-jigsaw",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Video Jigsaw puzzle (single-file static app).",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "html-minifier-terser": "^7.2.0",
+    "javascript-obfuscator": "^4.1.1"
+  }
+}

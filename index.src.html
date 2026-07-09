@@ -1,0 +1,1598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Video Jigsaw</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html {
+    width: 100%; height: 100%;
+    touch-action: manipulation; /* disables double-tap-to-zoom site-wide; still allows panning */
+  }
+  body {
+    min-height: 100%;
+    background: #0e0b1a;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: auto;   /* scroll instead of resizing if the PC window is smaller than the iPad size below */
+    touch-action: manipulation;
+  }
+  /* Fixed at the iPad Air 10.9" landscape size (1180x820 logical px) —
+     this never grows/shrinks with the browser window. On an actual iPad
+     in landscape it fills the screen exactly; on a PC it just sits at
+     this fixed size, centered, instead of stretching to the window. */
+  #app {
+    display: flex;
+    flex-direction: column;
+    width: 1180px;
+    height: 820px;
+    flex-shrink: 0;
+    position: relative;
+    overflow: hidden;   /* never let overflow spill outside the fixed iPad-size box —
+                            on the home screen, #puzzle-categories scrolls internally instead */
+  }
+
+  #home-screen, #puzzle-screen {
+    width: 100%; height: 100%;
+    display: flex; flex-direction: column;
+    min-height: 0;
+  }
+  #home-screen.hidden, #puzzle-screen.hidden { display: none; }
+
+  #home-content {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start; /* default for the subtitle; puzzle-categories overrides via align-self below */
+    gap: 4px;
+    flex: 1;
+    min-height: 0;
+    padding: 24px 0 0 0;
+  }
+  /* flex-shrink:0 keeps this pinned at top, never pushed out by the scrolling grid below.
+     The 90px left inset (aligning with Kaleidoscope 1's left edge) lives here now,
+     independent of puzzle-categories below, which is centered instead. */
+  #home-subtitle { flex-shrink: 0; font-size: 12px; color: rgba(255,255,255,0.5); margin: 0 0 10px 90px; text-align: left; }
+
+  #puzzle-scroll-wrap {
+    position: relative;
+    width: 1090px;       /* same width as before — just re-centered, not stretched/inset */
+    align-self: center;  /* center within the ribbon's full width instead of sitting at the left inset */
+    flex: 1;
+    min-height: 0;
+  }
+  #puzzle-categories {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+    padding: 0 20px 30px 0; /* small right gutter before the ribbon's edge; bottom breathing room */
+  }
+
+  /* Scroll affordances: iPad's overlay scrollbar gives no persistent hint
+     that there's more content, so a faded edge + one-time bouncing chevron
+     stand in for it. Both only ever show when the list actually overflows. */
+  #scroll-fade-top, #scroll-fade-bottom {
+    position: absolute;
+    left: 0; right: 0;
+    height: 108px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    z-index: 2;
+  }
+  #scroll-fade-top {
+    top: 0;
+    background: linear-gradient(to bottom, #000 0%, rgba(0,0,0,0.85) 35%, rgba(0,0,0,0.35) 70%, rgba(0,0,0,0) 100%);
+  }
+  #scroll-fade-bottom {
+    bottom: 0;
+    background: linear-gradient(to top, #000 0%, rgba(0,0,0,0.85) 35%, rgba(0,0,0,0.35) 70%, rgba(0,0,0,0) 100%);
+  }
+  #scroll-fade-top.visible, #scroll-fade-bottom.visible { opacity: 1; }
+
+  #scroll-chevron {
+    position: absolute;
+    bottom: 6px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 22px;
+    line-height: 1;
+    color: rgba(255,255,255,0.6);
+    pointer-events: none;
+    z-index: 3;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    animation: scroll-chevron-bounce 1.6s ease-in-out infinite;
+  }
+  #scroll-chevron.visible { opacity: 1; }
+  @keyframes scroll-chevron-bounce {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50%      { transform: translateX(-50%) translateY(6px); }
+  }
+  .category-section {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .category-title {
+    display: flex;
+    align-items: center;   /* vertically centers the line on the label's letters */
+    gap: 14px;
+    align-self: stretch;   /* span the section's full width, regardless of how
+                               many cards are in this particular row, so every
+                               divider line reaches the same right edge */
+    font-size: 14px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.55);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    text-align: left;
+  }
+  .category-title-line {
+    flex: 1;
+    height: 1px;
+    background: rgba(255,255,255,0.18);
+  }
+  .puzzle-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    justify-content: flex-start;
+  }
+  .puzzle-card {
+    width: 220px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  .puzzle-card .thumb-wrap {
+    width: 220px;
+    height: 124px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 2px solid rgba(255,255,255,0.16);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    transition: transform 0.12s, border-color 0.12s;
+    background: #000;
+  }
+  .puzzle-card:active .thumb-wrap { transform: scale(0.96); border-color: rgba(124,106,247,0.7); }
+  .puzzle-card .thumb-wrap canvas {
+    width: 100%; height: 100%;
+    display: block;
+    pointer-events: none;
+  }
+  .puzzle-card .puzzle-name { font-size: 15px; font-weight: 600; color: #fff; }
+
+  header {
+    flex-shrink: 0;
+    height: 52px;   /* fixed so the home and puzzle-screen ribbons always match exactly,
+                        regardless of which buttons/content each one happens to hold */
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+    padding: 0 16px;
+    background: #181428;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .header-left, .header-right {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    white-space: nowrap;  /* must never wrap — a 2nd line would shrink board-wrap's
+                              height mid-game and shift every piece's home position */
+  }
+  .ribbon-title {
+    font-size: 22px;
+    font-weight: 800;
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    white-space: nowrap;
+  }
+  button.btn {
+    font-size: 13px; font-weight: 500; padding: 7px 14px;
+    background: #221d38; color: #fff; border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 8px; cursor: pointer;
+  }
+  button.btn:active { opacity: 0.7; }
+  button.btn:disabled { opacity: 0.4; cursor: default; }
+  button.btn.accent { background: #7c6af7; border-color: transparent; }
+  button.btn.active { background: #7c6af7; border-color: transparent; }
+
+  #grid-size-group { display: flex; gap: 0; }
+  #grid-size-group .btn { border-radius: 0; }
+  #grid-size-group .btn:first-child { border-radius: 8px 0 0 8px; }
+  #grid-size-group .btn:last-child  { border-radius: 0 8px 8px 0; border-left: none; }
+
+  #diag {
+    display: none;   /* perf/debug readout kept for tooling (window.__fps etc.), just not shown */
+    font-size: 11px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    color: #9fe6a0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 360px;     /* fixed cap so warning suffixes never grow the header */
+    background: rgba(0,0,0,0.3);
+    padding: 4px 8px;
+    border-radius: 6px;
+    flex-shrink: 0;
+  }
+  #diag.warn { color: #ffcf4d; }
+
+  #board-wrap {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* Faint target outline showing where the solved puzzle belongs */
+  #board-target {
+    position: absolute;
+    z-index: 0;
+    outline: 2px dashed rgba(255,255,255,0.15);
+    background: rgba(255,255,255,0.02);
+    pointer-events: none;
+  }
+
+  /* Red dotted outline revealing a hinted piece's true home location.
+     Always shown well above every piece (see ++zCounter in showHint). */
+  #hint-canvas {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+  }
+  #hint-canvas.visible { display: block; }
+
+  .hint-overlay-text {
+    font-size: 15px;
+    line-height: 1.5;
+    margin-bottom: 20px;
+    max-width: 260px;
+  }
+
+  /* Solved message printed below the puzzle boundary (no blocking modal) */
+  #solved-text {
+    position: absolute;
+    z-index: 0;
+    text-align: center;
+    font-size: 22px;
+    font-weight: 700;
+    color: #30d158;
+    opacity: 0;
+    transition: opacity 0.4s ease, top 2s ease, left 2s ease, width 2s ease;
+    pointer-events: none;
+  }
+  #solved-text.visible { opacity: 1; }
+
+  canvas.piece {
+    position: absolute;
+    z-index: 1;
+    display: block;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform 0.15s ease;  /* only animates rotation — left/top drag movement is untouched */
+    /* Shadow is always drawn into the canvas bitmap itself (cheap, part of
+       the per-frame raster work we already pay for) rather than via a CSS
+       drop-shadow filter — dragging now can move an entire connected group
+       (up to ~48 pieces), and a CSS filter on that many simultaneously-
+       repainting canvases reintroduces the exact perf regression measured
+       earlier (~23fps lost with filters on all pieces at once). */
+  }
+  canvas.piece.dragging { cursor: grabbing; }
+  canvas.piece.locked { cursor: default; }
+
+  .overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.75);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .overlay.hidden { display: none; }
+  .overlay .card {
+    background: #221d38; border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 20px; padding: 36px 48px; text-align: center;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.7);
+  }
+
+  #start-overlay button.btn { font-size: 16px; padding: 12px 26px; }
+
+  /* Source video: invisible to the eye, but must stay inside the
+     viewport with non-zero size to keep decoding reliable. */
+  #source {
+    position: fixed;
+    top: 0; left: 0;
+    width: 2px; height: 2px;
+    opacity: 0;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+  <video id="source" autoplay loop muted playsinline></video>
+
+  <div id="app">
+
+    <div id="home-screen">
+      <header>
+        <div class="header-left">
+          <div class="ribbon-title">Video Jigsaw</div>
+        </div>
+      </header>
+      <div id="home-content">
+        <div id="home-subtitle">Choose a puzzle</div>
+        <div id="puzzle-scroll-wrap">
+          <div id="puzzle-categories"></div>
+          <div id="scroll-fade-top"></div>
+          <div id="scroll-fade-bottom"></div>
+          <div id="scroll-chevron">⌄</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="puzzle-screen" class="hidden">
+      <header>
+        <div class="header-left">
+          <button class="btn" id="home-btn">⌂ Home</button>
+          <div id="current-puzzle-name" class="ribbon-title"></div>
+        </div>
+        <div class="header-right">
+          <div id="grid-size-group">
+            <button class="btn" id="grid-3x5-btn" data-cols="5" data-rows="3">15 pcs</button>
+            <button class="btn" id="grid-4x6-btn" data-cols="6" data-rows="4">24 pcs</button>
+            <button class="btn" id="grid-5x7-btn" data-cols="7" data-rows="5">35 pcs</button>
+            <button class="btn" id="grid-6x8-btn" data-cols="8" data-rows="6">48 pcs</button>
+          </div>
+          <button class="btn" id="hint-btn">Hint</button>
+          <button class="btn" id="reshuffle-btn">Reshuffle</button>
+          <div id="diag">starting…</div>
+        </div>
+      </header>
+      <div id="board-wrap">
+        <div id="board-target"></div>
+        <div id="solved-text">Solved!</div>
+        <canvas id="hint-canvas"></canvas>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="start-overlay" class="overlay hidden">
+    <div class="card">
+      <button class="btn accent" id="start-btn">▶ Start Video</button>
+    </div>
+  </div>
+
+  <div id="hint-overlay" class="overlay hidden">
+    <div class="card">
+      <p class="hint-overlay-text">Click any piece to reveal its location.</p>
+      <button class="btn accent" id="hint-overlay-ok">OK</button>
+    </div>
+  </div>
+
+<script>
+'use strict';
+
+/* ── Config ──────────────────────────────────────────── */
+// All puzzles are expected to share the same aspect ratio (16:9, like
+// the entry below) — add more here as additional videos are generated.
+// Display order on the home screen follows this array's order, grouped
+// into one row per category (first-seen order). Add new entries near
+// others sharing their category to keep rows tidy.
+const PUZZLES = [
+  { name: 'Kaleidoscope 1', src: 'kaleidoscope01.mp4', category: 'Kaleidoscopes' },
+  { name: 'Kaleidoscope 2', src: 'kaleidoscope02.mp4', category: 'Kaleidoscopes' },
+  { name: 'Kaleidoscope 3', src: 'kaleidoscope03.mp4', category: 'Kaleidoscopes' },
+  { name: 'Kaleidoscope 4', src: 'kaleidoscope04.mp4', category: 'Kaleidoscopes' },
+  { name: 'Rain Droplets', src: 'Rain Droplets01.mp4', category: 'Nature' },
+  // Source file has baked-in pillarbox bars (~62px left, ~64px right at
+  // 1280x720); crop them out and stretch the remaining content to fill
+  // the 16:9 frame so no black bars show in the puzzle or its thumbnail.
+  { name: 'Landscape', src: 'Landscape01.mp4', crop: { left: 64, right: 66, top: 0, bottom: 0 }, category: 'Nature' },
+  { name: 'Sakura Leaves', src: 'Sakura Leaves.mp4', category: 'Nature' },
+  { name: 'Snowflakes', src: 'Snowflakes.mp4', category: 'Nature' },
+  { name: 'Koi Pond', src: 'gemini_generated_video_22841747.mp4', category: 'Nature' },
+  { name: 'Honeybees', src: 'gemini_generated_video_60F8A2ED.mp4', category: 'Nature' },
+  { name: 'Water Ripples', src: 'gemini_generated_video_779A42DA.mp4', category: 'Nature' },
+  { name: 'Sunflowers', src: 'Sunflowers.mp4', category: 'Nature' },
+  { name: 'July Fourth', src: 'July Fourth.mp4', category: 'Holidays' },
+  { name: "Valentine's Day", src: 'Valentines Day.mp4', category: 'Holidays' },
+  { name: 'Surfing Dog', src: 'Surfing Dog.mp4', category: 'Animals' },
+  { name: 'Bichon Frise Puppies', src: 'Bichon Frise Puppies.mp4', category: 'Animals' },
+  { name: 'Bunny Rabbits', src: 'Bunny Rabbits.mp4', category: 'Animals' },
+  { name: 'Chimps', src: 'Chimps.mp4', category: 'Animals' },
+  { name: 'Dolphins', src: 'Dolphins.mp4', category: 'Animals' },
+  { name: 'Ducklings', src: 'Ducklings.mp4', category: 'Animals' },
+  { name: 'Pandas', src: 'Pandas.mp4', category: 'Animals' },
+  { name: 'Penguin Nestlings', src: 'Penguin Nestlings.mp4', category: 'Animals' },
+  { name: 'Strawberries and Cream', src: 'Strawberris and Cream.mp4', category: 'Food' },
+  { name: 'Charcuterie', src: 'Charcuterie.mp4', category: 'Food' },
+  { name: 'Pasta Boiling', src: 'Pasta Boiling.mp4', category: 'Food' },
+  { name: 'Pizza', src: 'Pizza.mp4', category: 'Food' },
+  { name: 'Sundae', src: 'Sundae.mp4', category: 'Food' },
+  { name: 'Forest', src: 'Forest01.mp4', category: 'Fantasy' },
+  { name: 'Mermaids', src: 'Mermaids01.mp4', category: 'Fantasy' },
+  { name: 'Unicorns', src: 'Unicorns01.mp4', category: 'Fantasy' },
+];
+// "3x5"/"4x6" are expressed as ROWS x COLS (matches how the board's
+// 16:9 landscape boundary keeps individual pieces close to square —
+// COLS x ROWS would make pieces badly elongated). See grid-size buttons below.
+let COLS = 5, ROWS = 3;
+const MAX_OFFSCREEN_DIM = 1024;
+const SNAP_DIST = 20;
+
+// Win celebration: the locked-stroke fades to nothing over SOLVED_FADE_MS,
+// and the whole assembled puzzle scales up around its own center.
+const SOLVED_FADE_MS = 2000;
+const SOLVED_SCALE = 1.66;
+let isSolved = false;
+let solvedAt = null; // performance.now() timestamp of the moment it became solved
+
+/* ── DOM refs ────────────────────────────────────────── */
+const video         = document.getElementById('source');
+const homeScreen    = document.getElementById('home-screen');
+const puzzleScreen  = document.getElementById('puzzle-screen');
+const puzzleCategories = document.getElementById('puzzle-categories');
+const scrollFadeTop    = document.getElementById('scroll-fade-top');
+const scrollFadeBottom = document.getElementById('scroll-fade-bottom');
+const scrollChevron    = document.getElementById('scroll-chevron');
+const homeBtn       = document.getElementById('home-btn');
+const currentPuzzleNameEl = document.getElementById('current-puzzle-name');
+const boardWrap     = document.getElementById('board-wrap');
+const boardTarget   = document.getElementById('board-target');
+const solvedText    = document.getElementById('solved-text');
+const diagEl        = document.getElementById('diag');
+const startOverlay  = document.getElementById('start-overlay');
+const startBtn      = document.getElementById('start-btn');
+const reshuffleBtn  = document.getElementById('reshuffle-btn');
+const gridSizeBtns  = document.querySelectorAll('#grid-size-group .btn');
+const hintBtn       = document.getElementById('hint-btn');
+const hintCanvas    = document.getElementById('hint-canvas');
+const hintCtx       = hintCanvas.getContext('2d');
+const hintOverlay   = document.getElementById('hint-overlay');
+const hintOverlayOk = document.getElementById('hint-overlay-ok');
+
+/* ── State ───────────────────────────────────────────── */
+let offCanvas = null, offCtx = null;
+let pieceSrcW = 0, pieceSrcH = 0;     // cell size in offscreen-buffer pixels
+let originX = 0, originY = 0, dispW = 0, dispH = 0;
+let KNOB = 0, MARGIN = 0;             // bitmap-pixel units, fixed once per build
+let marginCss = 0;                    // MARGIN scaled into CSS px, updates on resize
+let pieces = [];
+let pieceByCanvas = new Map();
+let groupIdCounter = 0; // every group (even a lone piece) gets a unique id
+
+let fpsFrames = 0, lastFpsTime = 0, lastDrawMs = 0, currentFps = 0, frameCount = 0;
+
+let drag = null;          // { piece, offsetX, offsetY, pointerId }
+let zCounter = 10;
+let hintArmed = false;    // true while waiting for the player to select a piece to hint
+let hintPiece = null;     // the piece currently shown via the red dotted outline, or null
+let chevronDismissed = false; // true once the home screen's scroll-hint chevron has been dismissed
+let puzzleActive = false; // false while on the home screen — gates the render loop's per-piece work
+let activeCrop = { left: 0, right: 0, top: 0, bottom: 0 }; // per-puzzle black-bar crop, see PUZZLES
+let currentPuzzle = null;       // the PUZZLES entry currently open, for save/restore lookup
+let currentHEdge = null, currentVEdge = null; // edge tables behind the current board's jigsaw shapes
+let pendingRestore = null;      // saved-state payload to apply on the next buildBoard(), if any
+
+/* ── Save / restore (localStorage) ─────────────────────
+   Persists enough to reconstruct the exact same board on reload: which
+   puzzle, grid size, the jigsaw edge tables (so piece SHAPES match, not
+   just positions), every GROUP's position/rotation/locked state, and
+   which group each piece currently belongs to. ── */
+const SAVE_KEY = 'videoJigsawSave';
+
+function saveState() {
+  if (!puzzleActive || !currentPuzzle || !pieces.length) return;
+  const groupList = [...new Set(pieces.map(p => p.group))];
+  const groupIndex = new Map(groupList.map((g, i) => [g, i]));
+  const data = {
+    screen: 'puzzle',
+    puzzleSrc: currentPuzzle.src,
+    cols: COLS, rows: ROWS,
+    hEdge: currentHEdge, vEdge: currentVEdge,
+    groups: groupList.map(g => ({ anchorX: g.anchorX, anchorY: g.anchorY, locked: g.locked })),
+    pieces: pieces.map(p => ({ rotation: p.rotation, groupIdx: groupIndex.get(p.group) })),
+  };
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); }
+  catch (err) { console.warn('Could not save game state:', err.message); }
+}
+
+function saveHomeMarker() {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify({ screen: 'home' })); }
+  catch (err) { console.warn('Could not save game state:', err.message); }
+}
+
+function loadSavedState() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.warn('Could not read saved game state:', err.message);
+    return null;
+  }
+}
+
+// Validates the payload, then kicks off the normal startPuzzle() flow with
+// pendingRestore set so buildBoard() reuses the saved shapes/positions
+// instead of generating a fresh random layout. Old (pre-group) save
+// payloads lack `.groups` and are safely rejected here.
+function resumeFromSave(saved) {
+  if (!saved || saved.screen !== 'puzzle') return false;
+  const puzzle = PUZZLES.find(p => p.src === saved.puzzleSrc);
+  if (!puzzle) return false;
+  if (!Number.isInteger(saved.cols) || !Number.isInteger(saved.rows)) return false;
+  const total = saved.cols * saved.rows;
+  if (!Array.isArray(saved.pieces) || saved.pieces.length !== total) return false;
+  if (!Array.isArray(saved.hEdge) || !Array.isArray(saved.vEdge)) return false;
+  if (!Array.isArray(saved.groups) || !saved.groups.length) return false;
+  if (!saved.pieces.every(p => Number.isInteger(p.groupIdx) && p.groupIdx >= 0 && p.groupIdx < saved.groups.length)) return false;
+
+  COLS = saved.cols;
+  ROWS = saved.rows;
+  pendingRestore = saved;
+  startPuzzle(puzzle);
+  gridSizeBtns.forEach(btn => {
+    btn.classList.toggle('active', +btn.dataset.cols === COLS && +btn.dataset.rows === ROWS);
+  });
+  return true;
+}
+
+// Rebuilds groups from saved data instead of scattering fresh singleton
+// groups — used by buildBoard() when resuming from a save.
+function restorePieceStates(saved) {
+  const groups = saved.groups.map(g => ({
+    id: ++groupIdCounter, pieces: [], anchorX: g.anchorX, anchorY: g.anchorY, locked: !!g.locked
+  }));
+  for (let i = 0; i < pieces.length; i++) {
+    const p = pieces[i];
+    const sp = saved.pieces[i];
+    const g = groups[sp.groupIdx];
+    p.group = g;
+    p.rotation = sp.rotation;
+    g.pieces.push(p);
+  }
+  for (const g of groups) {
+    const anchor = g.pieces[0];
+    for (const p of g.pieces) {
+      p.localDx = p.home.x - anchor.home.x;
+      p.localDy = p.home.y - anchor.home.y;
+      p.canvas.style.transform = `rotate(${p.rotation}deg)`;
+      p.canvas.classList.toggle('locked', g.locked);
+      p.canvas.style.zIndex = g.locked ? 0 : 1; // locked pieces sit behind everything unsolved
+    }
+    updateGroupPivot(g);
+    for (const p of g.pieces) placeCanvasAt(p);
+  }
+  updateWinState();
+}
+
+function cropOf(puzzle) {
+  const c = puzzle.crop || {};
+  return { left: c.left || 0, right: c.right || 0, top: c.top || 0, bottom: c.bottom || 0 };
+}
+
+// Draws a puzzle's (crop-aware) first frame into a thumbnail canvas using a
+// throwaway <video>, briefly attached to the document since some browsers
+// only decode frames for in-DOM video elements.
+function captureFirstFrame(puzzle, canvas) {
+  const tempVideo = document.createElement('video');
+  tempVideo.muted = true;
+  tempVideo.playsInline = true;
+  tempVideo.preload = 'auto';
+  tempVideo.style.cssText = 'position:fixed;top:0;left:0;width:2px;height:2px;opacity:0;pointer-events:none;';
+
+  let captured = false;
+  let timeoutId = null;
+  function capture() {
+    if (captured) return;
+    captured = true;
+    clearTimeout(timeoutId);
+    const crop = cropOf(puzzle);
+    const sw = tempVideo.videoWidth - crop.left - crop.right;
+    const sh = tempVideo.videoHeight - crop.top - crop.bottom;
+    if (sw > 0 && sh > 0) {
+      canvas.getContext('2d').drawImage(tempVideo, crop.left, crop.top, sw, sh, 0, 0, canvas.width, canvas.height);
+    }
+    tempVideo.pause();
+    tempVideo.remove();
+  }
+
+  // 'playing' guarantees a real decoded frame; some browsers won't decode
+  // any frame at all for a video that's never been played, even muted —
+  // the same issue the main puzzle video hit, fixed the same way here.
+  tempVideo.addEventListener('playing', capture, { once: true });
+  tempVideo.addEventListener('loadeddata', () => {
+    const p = tempVideo.play();
+    if (p && typeof p.catch === 'function') p.catch(() => capture()); // autoplay blocked — use whatever frame is already decoded
+  }, { once: true });
+  timeoutId = setTimeout(capture, 4000); // safety net so a stuck video doesn't linger forever
+
+  document.body.appendChild(tempVideo);
+  tempVideo.src = puzzle.src;
+}
+
+/* ── Boot: build the home screen, attach the main video's lifecycle
+   listeners once (its src is only ever set when a puzzle is chosen) ── */
+buildHomeScreen();
+setGridSize(COLS, ROWS); // reflect the default grid size as active in the button UI;
+                         // puzzleActive is still false here, so this can't trigger a build
+resumeFromSave(loadSavedState()); // overrides the above if there's a valid save to resume
+
+video.addEventListener('loadedmetadata', () => { buildOffscreen(); buildBoard(); });
+video.addEventListener('canplay', tryPlay);
+
+function tryPlay() {
+  const p = video.play();
+  if (p && typeof p.catch === 'function') {
+    p.then(() => startOverlay.classList.add('hidden'))
+     .catch(() => startOverlay.classList.remove('hidden'));
+  }
+}
+startBtn.addEventListener('click', () => video.play().then(() => startOverlay.classList.add('hidden')));
+
+reshuffleBtn.addEventListener('click', scatterAllPieces);
+homeBtn.addEventListener('click', showHome);
+
+gridSizeBtns.forEach(btn => {
+  btn.addEventListener('click', () => setGridSize(+btn.dataset.cols, +btn.dataset.rows));
+});
+
+function setGridSize(cols, rows) {
+  COLS = cols;
+  ROWS = rows;
+  gridSizeBtns.forEach(btn => {
+    btn.classList.toggle('active', +btn.dataset.cols === COLS && +btn.dataset.rows === ROWS);
+  });
+  if (!puzzleActive) return;   // just remember the choice until a puzzle is open
+  buildOffscreen();            // re-slice the already-loaded video at the new grid size
+  buildBoard();                // rebuilds pieces and scatters them fresh
+}
+// No window 'resize' listener: #app is a fixed 1180x820 box (see CSS),
+// so board-wrap's dimensions never change after initial layout.
+
+/* ── Home screen ─────────────────────────────────────── */
+function buildHomeScreen() {
+  puzzleCategories.innerHTML = '';
+
+  const categories = [];
+  for (const puzzle of PUZZLES) {
+    if (!categories.includes(puzzle.category)) categories.push(puzzle.category);
+  }
+  categories.sort((a, b) => a.localeCompare(b)); // sections in ascending alphabetical order
+
+  for (const categoryName of categories) {
+    const section = document.createElement('div');
+    section.className = 'category-section';
+
+    const title = document.createElement('h2');
+    title.className = 'category-title';
+    const titleLabel = document.createElement('span');
+    titleLabel.className = 'category-title-label';
+    titleLabel.textContent = categoryName;
+    const titleLine = document.createElement('span');
+    titleLine.className = 'category-title-line';
+    title.appendChild(titleLabel);
+    title.appendChild(titleLine);
+    section.appendChild(title);
+
+    const row = document.createElement('div');
+    row.className = 'puzzle-row';
+
+    const puzzlesInCategory = PUZZLES.filter(p => p.category === categoryName)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const puzzle of puzzlesInCategory) {
+      const card = document.createElement('div');
+      card.className = 'puzzle-card';
+
+      const thumbWrap = document.createElement('div');
+      thumbWrap.className = 'thumb-wrap';
+      const thumbCanvas = document.createElement('canvas');
+      thumbCanvas.width = 220;
+      thumbCanvas.height = 124;
+      thumbWrap.appendChild(thumbCanvas);
+      captureFirstFrame(puzzle, thumbCanvas);
+
+      const label = document.createElement('div');
+      label.className = 'puzzle-name';
+      label.textContent = puzzle.name;
+
+      card.appendChild(thumbWrap);
+      card.appendChild(label);
+      card.addEventListener('click', () => startPuzzle(puzzle));
+      row.appendChild(card);
+    }
+
+    section.appendChild(row);
+    puzzleCategories.appendChild(section);
+  }
+
+  updateScrollIndicators();
+  document.body.dataset.homeReady = '1';
+}
+
+// Fade + one-time bouncing chevron stand in for iPad's overlay scrollbar,
+// which gives no persistent hint that the puzzle list has more rows below.
+// Both only ever appear when the list actually overflows; the chevron
+// dismisses itself permanently on the first scroll (in either direction).
+function updateScrollIndicators() {
+  const el = puzzleCategories;
+  const overflowing = el.scrollHeight > el.clientHeight + 1;
+  const atTop = el.scrollTop <= 0;
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+
+  scrollFadeTop.classList.toggle('visible', overflowing && !atTop);
+  scrollFadeBottom.classList.toggle('visible', overflowing && !atBottom);
+  scrollChevron.classList.toggle('visible', overflowing && !chevronDismissed);
+}
+
+puzzleCategories.addEventListener('scroll', () => {
+  if (!chevronDismissed && puzzleCategories.scrollTop > 0) chevronDismissed = true;
+  updateScrollIndicators();
+});
+
+function showHome() {
+  cancelDrag();
+  hideHint();
+  disarmHint();
+  puzzleActive = false;
+  video.pause();
+  puzzleScreen.classList.add('hidden');
+  homeScreen.classList.remove('hidden');
+  currentPuzzleNameEl.textContent = '';
+  saveHomeMarker();
+}
+
+function startPuzzle(puzzle) {
+  homeScreen.classList.add('hidden');
+  puzzleScreen.classList.remove('hidden');
+  puzzleActive = true;
+  currentPuzzle = puzzle;
+  activeCrop = cropOf(puzzle);
+  currentPuzzleNameEl.textContent = puzzle.name;
+
+  video.src = puzzle.src;
+  video.load();
+}
+
+/* ── Offscreen buffer (the single per-frame video grab) ─ */
+function buildOffscreen() {
+  const nativeW = video.videoWidth, nativeH = video.videoHeight;
+  if (!nativeW || !nativeH) return;
+
+  const scale = Math.min(1, MAX_OFFSCREEN_DIM / Math.max(nativeW, nativeH));
+  let w = Math.floor(nativeW * scale);
+  let h = Math.floor(nativeH * scale);
+  w -= w % COLS;
+  h -= h % ROWS;
+
+  offCanvas = document.createElement('canvas');
+  offCanvas.width = w; offCanvas.height = h;
+  offCtx = offCanvas.getContext('2d');
+
+  pieceSrcW = w / COLS;
+  pieceSrcH = h / ROWS;
+  KNOB   = Math.min(pieceSrcW, pieceSrcH) * 0.28;
+  MARGIN = KNOB * 1.6;
+}
+
+/* ── Geometry: where the target board sits inside board-wrap ─ */
+const BOARD_SHRINK = 0.6; // leaves perimeter room for scattering pieces
+
+function computeGeometry() {
+  const areaW = boardWrap.clientWidth  - 40;
+  const areaH = boardWrap.clientHeight - 40;
+  const ar = offCanvas.width / offCanvas.height;
+
+  let boardW, boardH;
+  if (areaW / ar <= areaH) { boardW = areaW; boardH = areaW / ar; }
+  else                     { boardH = areaH; boardW = areaH * ar; }
+  boardW *= BOARD_SHRINK;
+  boardH *= BOARD_SHRINK;
+
+  originX = (boardWrap.clientWidth  - boardW) / 2;
+  originY = (boardWrap.clientHeight - boardH) / 2;
+  dispW = boardW / COLS;
+  dispH = boardH / ROWS;
+  marginCss = MARGIN * (dispW / pieceSrcW);
+
+  boardTarget.style.left   = originX + 'px';
+  boardTarget.style.top    = originY + 'px';
+  boardTarget.style.width  = boardW  + 'px';
+  boardTarget.style.height = boardH  + 'px';
+
+  solvedText.style.left  = originX + 'px';
+  solvedText.style.top   = (originY + boardH + 16) + 'px';
+  solvedText.style.width = boardW + 'px';
+}
+
+/* ── Jigsaw edge geometry ────────────────────────────────
+   Canonical edge drawn left-to-right along local +x, from (0,0)
+   to (len,0). Canonical -y = "outward" (away from piece body).
+   dir: +1 = tab (bulges outward), -1 = blank (dips inward), 0 = flat.
+   Absolute points are computed by hand (rotation + translation)
+   because Path2D has no transform stack of its own. ─────────── */
+function rotatePoint(x, y, angleDeg) {
+  const r = angleDeg * Math.PI / 180;
+  const cos = Math.cos(r), sin = Math.sin(r);
+  return [x * cos - y * sin, x * sin + y * cos];
+}
+
+function addEdgeAbs(path, corner, angleDeg, len, dir, knob) {
+  const abs = (x, y) => {
+    const [dx, dy] = rotatePoint(x, y, angleDeg);
+    return [corner[0] + dx, corner[1] + dy];
+  };
+  if (dir === 0) {
+    const [ex, ey] = abs(len, 0);
+    path.lineTo(ex, ey);
+    return;
+  }
+  const a = -dir * knob;     // canonical outward = -y
+  const w = knob * 0.8;
+  const neck = len / 2;
+
+  let pt = abs(neck - w * 1.5, 0);                path.lineTo(pt[0], pt[1]);
+  let c1 = abs(neck - w * 1.5, a * 0.3);
+  let c2 = abs(neck - w,       a);
+  let e1 = abs(neck - w * 0.5, a);
+  path.bezierCurveTo(c1[0], c1[1], c2[0], c2[1], e1[0], e1[1]);
+  let c3 = abs(neck - w * 0.2, a * 1.3);
+  let c4 = abs(neck + w * 0.2, a * 1.3);
+  let e2 = abs(neck + w * 0.5, a);
+  path.bezierCurveTo(c3[0], c3[1], c4[0], c4[1], e2[0], e2[1]);
+  let c5 = abs(neck + w,       a);
+  let c6 = abs(neck + w * 1.5, a * 0.3);
+  let e3 = abs(neck + w * 1.5, 0);
+  path.bezierCurveTo(c5[0], c5[1], c6[0], c6[1], e3[0], e3[1]);
+  let pf = abs(len, 0);                           path.lineTo(pf[0], pf[1]);
+}
+
+function buildPiecePath2D(cellW, cellH, marginX, marginY, knob, topDir, rightDir, bottomDir, leftDir) {
+  const path = new Path2D();
+  const tl = [marginX, marginY];
+  const tr = [marginX + cellW, marginY];
+  const br = [marginX + cellW, marginY + cellH];
+  const bl = [marginX, marginY + cellH];
+  path.moveTo(tl[0], tl[1]);
+  addEdgeAbs(path, tl, 0,   cellW, topDir,    knob);
+  addEdgeAbs(path, tr, 90,  cellH, rightDir,  knob);
+  addEdgeAbs(path, br, 180, cellW, bottomDir, knob);
+  addEdgeAbs(path, bl, 270, cellH, leftDir,   knob);
+  path.closePath();
+  return path;
+}
+
+function generateEdgeTables() {
+  const hEdge = []; // boundary between (c,r) above and (c,r+1) below; +1 = above has the tab
+  for (let r = 0; r < ROWS - 1; r++) hEdge.push(Array.from({ length: COLS }, () => Math.random() < 0.5 ? 1 : -1));
+  const vEdge = []; // boundary between (c,r) left and (c+1,r) right; +1 = left has the tab
+  for (let r = 0; r < ROWS; r++) vEdge.push(Array.from({ length: COLS - 1 }, () => Math.random() < 0.5 ? 1 : -1));
+  return { hEdge, vEdge };
+}
+
+/* ── Build pieces (initial load / new video) ────────────── */
+function buildBoard() {
+  if (!offCanvas) return;
+
+  computeGeometry();
+  hideHint();
+  disarmHint();
+
+  pieces.forEach(p => p.canvas.remove());
+  pieces = [];
+  pieceByCanvas.clear();
+
+  const restore = pendingRestore;
+  pendingRestore = null;
+
+  const { hEdge, vEdge } = restore ? { hEdge: restore.hEdge, vEdge: restore.vEdge } : generateEdgeTables();
+  currentHEdge = hEdge;
+  currentVEdge = vEdge;
+  const bitmapW = pieceSrcW + 2 * MARGIN;
+  const bitmapH = pieceSrcH + 2 * MARGIN;
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const topDir    = r === 0        ? 0 : -hEdge[r - 1][c];
+      const bottomDir  = r === ROWS - 1 ? 0 :  hEdge[r][c];
+      const rightDir   = c === COLS - 1 ? 0 :  vEdge[r][c];
+      const leftDir    = c === 0        ? 0 : -vEdge[r][c - 1];
+
+      const canvas = document.createElement('canvas');
+      canvas.className = 'piece';
+      canvas.width  = bitmapW;
+      canvas.height = bitmapH;
+      boardWrap.appendChild(canvas);
+
+      const piece = {
+        col: c, row: r,
+        sx: c * pieceSrcW, sy: r * pieceSrcH,
+        canvas, ctx: canvas.getContext('2d'),
+        path2D: buildPiecePath2D(pieceSrcW, pieceSrcH, MARGIN, MARGIN, KNOB, topDir, rightDir, bottomDir, leftDir),
+        dirs: { top: topDir, right: rightDir, bottom: bottomDir, left: leftDir },
+        home: { x: originX + c * dispW, y: originY + r * dispH },
+        isCorner: (c === 0 || c === COLS - 1) && (r === 0 || r === ROWS - 1),
+        rotation: 0,
+        localDx: 0, localDy: 0, // fixed offset from this piece's group anchor; set on group/merge
+        group: null             // assigned below by restorePieceStates() or scatterAllPieces()
+      };
+      pieceByCanvas.set(canvas, piece);
+      pieces.push(piece);
+    }
+  }
+
+  applyAllSizes();
+
+  if (restore && restore.pieces.length === pieces.length) {
+    restorePieceStates(restore);
+  } else {
+    scatterAllPieces();
+  }
+
+  canvasReadBlocked = false;
+  taintCheckPending = true;   // re-checked after the first real frame is drawn
+
+  document.body.dataset.ready = '1';
+  saveState();
+}
+
+let pieceCssW = 0, pieceCssH = 0; // CSS display size of every piece canvas (unrotated)
+
+function applyAllSizes() {
+  pieceCssW = (pieceSrcW + 2 * MARGIN) * (dispW / pieceSrcW);
+  pieceCssH = (pieceSrcH + 2 * MARGIN) * (dispH / pieceSrcH);
+  for (const p of pieces) {
+    p.canvas.style.width  = pieceCssW + 'px';
+    p.canvas.style.height = pieceCssH + 'px';
+  }
+}
+
+/* ── Groups ──────────────────────────────────────────────
+   A "group" is a rigid cluster of one or more pieces that move and rotate
+   together. Every piece always belongs to exactly one group (even a lone,
+   unconnected piece is a group of one). Group state lives on the group
+   object (anchorX/anchorY/locked); each piece keeps its OWN rotation
+   value (never overwritten to an unrelated number — only ever shifted by
+   the same delta as its groupmates) plus a fixed localDx/localDy offset
+   from its group's anchor (pieces[0]), derived from the immutable `home`
+   geometry. A piece's actual on-screen position/orientation is always
+   DERIVED from these, never stored redundantly. ────────────────────── */
+
+function rotateVec(x, y, deg) {
+  const rad = deg * Math.PI / 180;
+  const cos = Math.cos(rad), sin = Math.sin(rad);
+  return [x * cos - y * sin, x * sin + y * cos];
+}
+
+function effectiveRotation(piece) {
+  return ((piece.rotation % 360) + 360) % 360;
+}
+
+// Where the piece actually, visually sits/faces right now — used for all
+// LOGICAL geometry (alignment checks, hit-testing, corner-to-home distance).
+function pieceAbsolutePos(piece) {
+  const [rx, ry] = rotateVec(piece.localDx, piece.localDy, piece.rotation);
+  return { x: piece.group.anchorX + rx, y: piece.group.anchorY + ry };
+}
+
+// Where the piece's CSS box sits if the group were at rotation 0 — this is
+// what left/top are actually set to. Rotation is applied entirely via
+// transform + a per-piece transform-origin pointing at the group's shared
+// pivot (see updateGroupPivot), so left/top never need to change just
+// because the group rotated — only because it was DRAGGED. That's what
+// lets native CSS rotation animate the whole group as one rigid piece
+// instead of each canvas spinning around its own center independently.
+function unrotatedPos(piece) {
+  return { x: piece.group.anchorX + piece.localDx, y: piece.group.anchorY + piece.localDy };
+}
+
+function placeCanvasAt(piece) {
+  const pos = unrotatedPos(piece);
+  piece.canvas.style.left = (pos.x - marginCss) + 'px';
+  piece.canvas.style.top  = (pos.y - marginCss) + 'px';
+}
+
+// Recomputes the group's rotation pivot — the bounding-box center of all
+// member pieces' cells in their canonical (unrotated) layout — and points
+// every member's transform-origin at it. For a lone piece this reduces
+// exactly to 50%/50% (its own center), matching the prior single-piece
+// behavior; for a multi-piece group, every member now orbits the SAME
+// shared point, so rotating any one of them rotates the whole cluster
+// rigidly. Must be re-run whenever group membership changes (merges),
+// since the bounding box — and thus the pivot — shifts.
+function updateGroupPivot(group) {
+  let minX = 0, minY = 0, maxX = dispW, maxY = dispH;
+  for (const p of group.pieces) {
+    minX = Math.min(minX, p.localDx);     minY = Math.min(minY, p.localDy);
+    maxX = Math.max(maxX, p.localDx + dispW); maxY = Math.max(maxY, p.localDy + dispH);
+  }
+  const centerOffsetX = (minX + maxX) / 2;
+  const centerOffsetY = (minY + maxY) / 2;
+  for (const p of group.pieces) {
+    const originX = marginCss + centerOffsetX - p.localDx;
+    const originY = marginCss + centerOffsetY - p.localDy;
+    p.canvas.style.transformOrigin = `${originX}px ${originY}px`;
+  }
+}
+
+function areGridAdjacent(p1, p2) {
+  const dc = p1.col - p2.col, dr = p1.row - p2.row;
+  return (Math.abs(dc) === 1 && dr === 0) || (dc === 0 && Math.abs(dr) === 1);
+}
+
+function getGridNeighbors(piece) {
+  return pieces.filter(p => areGridAdjacent(p, piece));
+}
+
+// Two grid-adjacent pieces are ready to connect when their groups share
+// the same effective rotation AND their current relative position matches
+// the solved layout's relative offset (rotated into the group's current
+// orientation) within SNAP_DIST.
+function piecesAligned(p1, p2) {
+  if (p1.group === p2.group) return false;
+  if (effectiveRotation(p1) !== effectiveRotation(p2)) return false;
+
+  const [edx, edy] = rotateVec((p2.col - p1.col) * dispW, (p2.row - p1.row) * dispH, p1.rotation);
+  const pos1 = pieceAbsolutePos(p1);
+  const pos2 = pieceAbsolutePos(p2);
+  const actualDx = pos2.x - pos1.x;
+  const actualDy = pos2.y - pos1.y;
+
+  return Math.hypot(actualDx - edx, actualDy - edy) <= SNAP_DIST;
+}
+
+// Absorbs `absorb`'s pieces into `keep` (preferring to keep a locked
+// group's frame authoritative). Re-derives the absorbed pieces' offsets
+// from their immutable home geometry, so the connection becomes exactly
+// precise — never left at whatever approximate spot the drag left it.
+function mergeGroups(keep, absorb) {
+  if (keep === absorb) return keep;
+  if (absorb.locked && !keep.locked) { const t = keep; keep = absorb; absorb = t; }
+
+  const anchor = keep.pieces[0];
+  for (const p of absorb.pieces) {
+    p.group = keep;
+    p.localDx = p.home.x - anchor.home.x;
+    p.localDy = p.home.y - anchor.home.y;
+    keep.pieces.push(p);
+  }
+  if (absorb.locked) keep.locked = true;
+  updateGroupPivot(keep); // bounding box just grew — every member's pivot shifts, not just the absorbed ones
+  for (const p of keep.pieces) {
+    if (keep.locked) {
+      p.canvas.classList.add('locked');
+      p.canvas.style.zIndex = 0; // behind every unsolved piece, even pieces just newly absorbed into a locked group
+    }
+    placeCanvasAt(p);
+  }
+  return keep;
+}
+
+// Repeatedly absorbs any grid-adjacent, alignment-ready neighboring group
+// until no more connections are found, then checks whether a corner in
+// the resulting group can now snap to the board.
+function checkConnections(group) {
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (const p of group.pieces) {
+      for (const n of getGridNeighbors(p)) {
+        if (n.group !== group && piecesAligned(p, n)) {
+          group = mergeGroups(group, n.group);
+          merged = true;
+          break;
+        }
+      }
+      if (merged) break;
+    }
+  }
+  checkCornerSnap(group);
+  // Unconditional: a group can already be locked (anchored earlier) and
+  // still only NOW satisfy "every piece is in this one locked group" by
+  // absorbing the rest via pure piece-to-piece merges above — that's not
+  // a fresh corner-snap event, so checkCornerSnap() alone won't catch it.
+  updateWinState();
+}
+
+// Only the 4 corner pieces ever snap to the absolute board grid — every
+// other piece can only ever connect to its neighbors. Snapping a corner
+// locks the WHOLE group permanently in place (it's now anchored to the
+// board frame, so dragging/rotating it again would misplace everything
+// already correctly connected to it).
+function checkCornerSnap(group) {
+  if (group.locked) return;
+  for (const p of group.pieces) {
+    if (!p.isCorner || effectiveRotation(p) !== 0) continue;
+    const pos = pieceAbsolutePos(p);
+    const dist = Math.hypot(pos.x - p.home.x, pos.y - p.home.y);
+    if (dist > SNAP_DIST) continue;
+
+    group.anchorX += (p.home.x - pos.x);
+    group.anchorY += (p.home.y - pos.y);
+    // No rotation change here: every piece in a group always shares the
+    // same EFFECTIVE rotation by construction (that's required for any
+    // two pieces to connect in the first place), so the whole group is
+    // already visually upright — touching .rotation would only risk an
+    // unwanted spin for members whose literal (but equivalent) value
+    // differs from this corner's.
+    group.locked = true;
+    for (const m of group.pieces) {
+      m.canvas.classList.add('locked');
+      m.canvas.style.zIndex = 0; // behind every unsolved piece, so it never blocks grabbing one
+      placeCanvasAt(m);
+    }
+    return; // checkConnections() calls updateWinState() once, unconditionally, after this returns
+  }
+}
+
+function updateWinState() {
+  const solved = pieces.length > 0 && pieces[0].group.locked && pieces.every(p => p.group === pieces[0].group);
+  solvedText.classList.toggle('visible', solved);
+
+  if (solved && !isSolved) {
+    // Just now completed: kick off the reveal. The green stroke's fade is
+    // handled per-frame in tick() (it's drawn into the canvas bitmap, not
+    // a CSS-stylable element); the scale-up is a real CSS transition —
+    // override the normal quick 0.15s rotation transition with a slower
+    // one just for this, since these pieces are locked and will never
+    // need the snappy version again.
+    solvedAt = performance.now();
+    for (const p of pieces) {
+      p.canvas.style.transition = `transform ${SOLVED_FADE_MS}ms ease`;
+      p.canvas.style.transform = `rotate(${p.rotation}deg) scale(${SOLVED_SCALE})`;
+    }
+    // The puzzle is about to grow around its own center — move the label
+    // to sit below the new, larger bottom edge instead of being covered
+    // by it. (computeGeometry() resets this back to the un-grown position
+    // whenever a board is freshly built.) Pieces' canvases extend marginCss
+    // past the strict cell grid (room for tabs to poke outward), so the
+    // true bottom edge — before scaling — is boardH/2 + marginCss below
+    // the board's center, not just boardH/2.
+    const boardW = dispW * COLS, boardH = dispH * ROWS;
+    const grownW = boardW * SOLVED_SCALE + marginCss * 2 * SOLVED_SCALE;
+    const grownBottom = originY + boardH / 2 + (boardH / 2 + marginCss) * SOLVED_SCALE;
+    solvedText.style.left  = (originX + (boardW - grownW) / 2) + 'px';
+    solvedText.style.width = grownW + 'px';
+    solvedText.style.top   = (grownBottom + 16) + 'px';
+  } else if (!solved) {
+    solvedAt = null;
+  }
+  isSolved = solved;
+
+  // No unsolved pieces left to hint at once the whole board is one locked group.
+  hintBtn.disabled = solved;
+  if (solved) { disarmHint(); hideHint(); }
+}
+
+/* ── Scatter ─────────────────────────────────────────── */
+const SHUFFLE_ROTATIONS = [90, 180, 270]; // never 0 — every piece starts wrong-side-up
+
+function scatterAllPieces() {
+  if (!pieces.length) return;
+  const maxX = Math.max(0, boardWrap.clientWidth  - dispW);
+  const maxY = Math.max(0, boardWrap.clientHeight - dispH);
+
+  hideHint();
+  disarmHint();
+  hintBtn.disabled = false;
+  isSolved = false;
+  solvedAt = null;
+  for (const p of pieces) {
+    p.group = { id: ++groupIdCounter, pieces: [p], anchorX: Math.random() * maxX, anchorY: Math.random() * maxY, locked: false };
+    p.localDx = 0; p.localDy = 0;
+    p.rotation = SHUFFLE_ROTATIONS[Math.floor(Math.random() * SHUFFLE_ROTATIONS.length)];
+    p.canvas.style.transition = ''; // undo the slow win-reveal override, if any — back to the default 0.15s
+    p.canvas.style.transform = `rotate(${p.rotation}deg)`;
+    p.canvas.classList.remove('locked');
+    p.canvas.style.zIndex = 1;
+    updateGroupPivot(p.group);
+    placeCanvasAt(p);
+  }
+  solvedText.classList.remove('visible');
+  saveState();
+}
+
+/* ── Hit-testing: pick the topmost piece that is actually
+   opaque at this point (so transparent tab/blank margins
+   don't block clicks meant for a piece underneath) ────── */
+let canvasReadBlocked = false; // set true if getImageData throws (e.g. tainted canvas on file://)
+let taintCheckPending = false; // re-test right after the first real video frame is drawn
+
+function findPieceAt(clientX, clientY) {
+  const stack = document.elementsFromPoint(clientX, clientY);
+  const wrapRect = boardWrap.getBoundingClientRect();
+  for (const el of stack) {
+    const piece = pieceByCanvas.get(el);
+    if (!piece) continue;
+
+    if (canvasReadBlocked) return piece;   // degrade to plain topmost-element picking
+
+    // CSS transform:rotate() is purely visual, so getBoundingClientRect()
+    // (which reflects the rotated box) can't be used to map back to
+    // canvas-local pixels. Use the known unrotated layout box instead and
+    // inverse-rotate the click point around its center.
+    const pos = pieceAbsolutePos(piece);
+    const boxLeft = wrapRect.left + pos.x - marginCss;
+    const boxTop  = wrapRect.top  + pos.y - marginCss;
+    const sx = clientX - (boxLeft + pieceCssW / 2);
+    const sy = clientY - (boxTop  + pieceCssH / 2);
+    let lx, ly;
+    switch (effectiveRotation(piece)) {
+      case 90:  lx = sy;  ly = -sx; break;
+      case 180: lx = -sx; ly = -sy; break;
+      case 270: lx = -sy; ly = sx;  break;
+      default:  lx = sx;  ly = sy;
+    }
+    const px = Math.floor((pieceCssW / 2 + lx) / pieceCssW  * piece.canvas.width);
+    const py = Math.floor((pieceCssH / 2 + ly) / pieceCssH  * piece.canvas.height);
+    if (px < 0 || py < 0 || px >= piece.canvas.width || py >= piece.canvas.height) continue;
+    try {
+      const alpha = piece.ctx.getImageData(px, py, 1, 1).data[3];
+      if (alpha > 10) return piece;
+    } catch (err) {
+      // Canvas tainted by cross-origin data — typically happens when the
+      // page is opened via file:// instead of http(s). Fall back to
+      // picking whatever piece is topmost at this point, ignoring its
+      // transparent margin, rather than breaking dragging entirely.
+      canvasReadBlocked = true;
+      console.warn('Per-pixel hit-testing disabled (canvas tainted, likely file:// origin). ' +
+        'Serve over http(s) to restore click-through on transparent tab/blank margins. Reason:', err.message);
+      renderDiag();
+      return piece;
+    }
+  }
+  return null;
+}
+
+/* ── Hints ───────────────────────────────────────────────
+   "Hint" arms a one-shot selection mode (button highlighted) instead of
+   showing anything immediately. The next click on an unsolved piece reveals
+   that piece's own jigsaw silhouette (its real Path2D, not a generic box),
+   drawn as a red dashed outline at its true home cell — letting the player
+   match the shape/edges without auto-placing it for them. The outline stays
+   up across normal pointer moves and stays correct even while the board is
+   panned/zoomed-by-nothing, since #board-wrap never resizes (see comment at
+   setGridSize). It's cleared the moment the player grabs any piece to drag,
+   per the request that it persist only until the next "grab". ──────── */
+const HINT_SEEN_KEY = 'videoJigsawHintSeen';
+
+function hasSeenHintIntro(puzzle) {
+  try {
+    const seen = JSON.parse(localStorage.getItem(HINT_SEEN_KEY) || '[]');
+    return seen.includes(puzzle.src);
+  } catch { return false; }
+}
+function markHintIntroSeen(puzzle) {
+  try {
+    const seen = JSON.parse(localStorage.getItem(HINT_SEEN_KEY) || '[]');
+    if (!seen.includes(puzzle.src)) {
+      seen.push(puzzle.src);
+      localStorage.setItem(HINT_SEEN_KEY, JSON.stringify(seen));
+    }
+  } catch (err) { console.warn('Could not save hint-intro state:', err.message); }
+}
+
+function showHint(piece) {
+  hintPiece = piece;
+  const bitmapW = pieceSrcW + 2 * MARGIN;
+  const bitmapH = pieceSrcH + 2 * MARGIN;
+  hintCanvas.width  = bitmapW;
+  hintCanvas.height = bitmapH;
+  hintCanvas.style.width  = pieceCssW + 'px';
+  hintCanvas.style.height = pieceCssH + 'px';
+  hintCanvas.style.left = (piece.home.x - marginCss) + 'px';
+  hintCanvas.style.top  = (piece.home.y - marginCss) + 'px';
+  hintCanvas.style.zIndex = ++zCounter; // always above every piece shown so far, locked or not
+  hintCanvas.classList.add('visible');
+
+  hintCtx.clearRect(0, 0, bitmapW, bitmapH);
+  hintCtx.save();
+  hintCtx.setLineDash([10, 7]);
+  hintCtx.lineWidth = 3.5;
+  hintCtx.strokeStyle = '#ff3b30';
+  hintCtx.stroke(piece.path2D);
+  hintCtx.restore();
+}
+
+function hideHint() {
+  hintPiece = null;
+  hintCanvas.classList.remove('visible');
+}
+
+function disarmHint() {
+  hintArmed = false;
+  hintBtn.classList.remove('active');
+}
+
+hintBtn.addEventListener('click', () => {
+  if (hintArmed) { disarmHint(); return; } // clicking again while waiting cancels
+  hideHint();
+  hintArmed = true;
+  hintBtn.classList.add('active');
+  if (currentPuzzle && !hasSeenHintIntro(currentPuzzle)) {
+    markHintIntroSeen(currentPuzzle);
+    hintOverlay.classList.remove('hidden');
+  }
+});
+hintOverlayOk.addEventListener('click', () => hintOverlay.classList.add('hidden'));
+
+/* ── Drag & drop (pointer events: mouse + touch) ───────── */
+const CLICK_MOVE_THRESHOLD = 6; // px of pointer travel before a press counts as a drag, not a click
+
+boardWrap.addEventListener('pointerdown', (e) => {
+  if (drag) return;
+  const piece = findPieceAt(e.clientX, e.clientY);
+
+  if (hintArmed) {
+    // Selection mode: the next valid (unsolved) piece picked consumes the
+    // arming and reveals its hint, WITHOUT starting a drag or the usual
+    // click-to-rotate — clicks on locked pieces or empty space don't count,
+    // so the button stays armed and waiting.
+    if (piece && !piece.group.locked) {
+      e.preventDefault();
+      disarmHint();
+      showHint(piece);
+    }
+    return;
+  }
+
+  if (!piece || piece.group.locked) return;
+  e.preventDefault();
+  hideHint(); // grabbing any piece clears a previously-shown hint
+
+  const group = piece.group;
+  const wrapRect = boardWrap.getBoundingClientRect();
+  drag = {
+    group,
+    offsetX: e.clientX - wrapRect.left - group.anchorX,
+    offsetY: e.clientY - wrapRect.top  - group.anchorY,
+    bounds: getGroupBounds(group), // computed once; group membership can't change mid-drag
+    startClientX: e.clientX,
+    startClientY: e.clientY,
+    moved: false,
+    pointerId: e.pointerId
+  };
+  zCounter++;
+  for (const p of group.pieces) {
+    p.canvas.style.zIndex = zCounter;
+    p.canvas.classList.add('dragging');
+  }
+
+  document.addEventListener('pointermove', onDragMove, { passive: false });
+  document.addEventListener('pointerup', onDragEnd);
+  document.addEventListener('pointercancel', onDragEnd);
+});
+
+// Bounding box of every member piece's current (rotated) offset from the
+// group's anchor — used to keep the WHOLE group roughly within board-wrap
+// while dragging, regardless of how many pieces it has or how it's rotated.
+function getGroupBounds(group) {
+  let minX = 0, minY = 0, maxX = dispW, maxY = dispH;
+  for (const p of group.pieces) {
+    const [rx, ry] = rotateVec(p.localDx, p.localDy, p.rotation);
+    minX = Math.min(minX, rx); minY = Math.min(minY, ry);
+    maxX = Math.max(maxX, rx + dispW); maxY = Math.max(maxY, ry + dispH);
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function onDragMove(e) {
+  if (!drag || e.pointerId !== drag.pointerId) return;
+  e.preventDefault();
+
+  if (!drag.moved) {
+    const traveled = Math.hypot(e.clientX - drag.startClientX, e.clientY - drag.startClientY);
+    if (traveled > CLICK_MOVE_THRESHOLD) drag.moved = true;
+  }
+
+  const wrapRect = boardWrap.getBoundingClientRect();
+  const b = drag.bounds;
+  const minAnchorX = -b.minX, maxAnchorX = Math.max(minAnchorX, boardWrap.clientWidth  - b.maxX);
+  const minAnchorY = -b.minY, maxAnchorY = Math.max(minAnchorY, boardWrap.clientHeight - b.maxY);
+
+  let x = e.clientX - wrapRect.left - drag.offsetX;
+  let y = e.clientY - wrapRect.top  - drag.offsetY;
+  x = Math.min(Math.max(minAnchorX, x), maxAnchorX);
+  y = Math.min(Math.max(minAnchorY, y), maxAnchorY);
+
+  drag.group.anchorX = x;
+  drag.group.anchorY = y;
+  for (const p of drag.group.pieces) placeCanvasAt(p);
+}
+
+function cancelDrag() {
+  if (!drag) return;
+  for (const p of drag.group.pieces) p.canvas.classList.remove('dragging');
+  document.removeEventListener('pointermove', onDragMove);
+  document.removeEventListener('pointerup', onDragEnd);
+  document.removeEventListener('pointercancel', onDragEnd);
+  drag = null;
+}
+
+function onDragEnd(e) {
+  if (!drag || (e.type !== 'pointercancel' && e.pointerId !== drag.pointerId)) return;
+
+  const group = drag.group;
+  const wasClick = !drag.moved && e.type !== 'pointercancel';
+  for (const p of group.pieces) p.canvas.classList.remove('dragging');
+  document.removeEventListener('pointermove', onDragMove);
+  document.removeEventListener('pointerup', onDragEnd);
+  document.removeEventListener('pointercancel', onDragEnd);
+  drag = null;
+
+  // A tap/click (pointer never moved) rotates the whole group 90° clockwise
+  // around its shared pivot (see updateGroupPivot) instead of being treated
+  // as a (no-op) drop. left/top never change here — only transform — so
+  // CSS animates the whole rigid cluster as one piece, not each canvas
+  // spinning around its own center independently.
+  if (wasClick) {
+    for (const p of group.pieces) {
+      p.rotation += 90;
+      p.canvas.style.transform = `rotate(${p.rotation}deg)`;
+    }
+  }
+
+  checkConnections(group);
+  saveState();
+}
+
+/* ── Render loop: ONE video grab/frame, then clip+blit per piece ── */
+function tick(now) {
+  if (puzzleActive && offCanvas && video.readyState >= 2) {
+    const t0 = performance.now();
+    offCtx.drawImage(
+      video,
+      activeCrop.left, activeCrop.top,
+      video.videoWidth - activeCrop.left - activeCrop.right,
+      video.videoHeight - activeCrop.top - activeCrop.bottom,
+      0, 0, offCanvas.width, offCanvas.height
+    );
+
+    for (const p of pieces) {
+      const w = p.canvas.width, h = p.canvas.height;
+      p.ctx.clearRect(0, 0, w, h);
+
+      // Cheap shape-following shadow baked into the bitmap (see CSS
+      // comment on canvas.piece for why this isn't a CSS filter).
+      p.ctx.save();
+      p.ctx.shadowColor = 'rgba(0,0,0,0.55)';
+      p.ctx.shadowBlur = 7;
+      p.ctx.shadowOffsetY = 3;
+      p.ctx.fillStyle = '#000';
+      p.ctx.fill(p.path2D);
+      p.ctx.restore();
+
+      p.ctx.save();
+      p.ctx.clip(p.path2D);
+      p.ctx.drawImage(
+        offCanvas,
+        p.sx - MARGIN, p.sy - MARGIN, w, h,
+        0, 0, w, h
+      );
+      p.ctx.restore();
+
+      p.ctx.lineWidth = 2.5;
+      let strokeStyle = null; // null means "fully faded, don't draw"
+      if (drag && p.group === drag.group) {
+        strokeStyle = 'rgba(124,106,247,0.9)';
+      } else if (p.group.locked) {
+        let alpha = 0.85;
+        if (solvedAt !== null) alpha *= Math.max(0, 1 - (now - solvedAt) / SOLVED_FADE_MS);
+        if (alpha > 0.003) strokeStyle = `rgba(48,209,88,${alpha})`;
+      } else {
+        strokeStyle = 'rgba(0,0,0,0.55)';
+      }
+      if (strokeStyle) {
+        p.ctx.strokeStyle = strokeStyle;
+        p.ctx.stroke(p.path2D);
+      }
+    }
+
+    lastDrawMs = performance.now() - t0;
+    frameCount++;
+    window.__frameCount = frameCount;
+
+    if (taintCheckPending) {
+      taintCheckPending = false;
+      try { pieces[0].ctx.getImageData(0, 0, 1, 1); }
+      catch (err) {
+        canvasReadBlocked = true;
+        console.warn('Per-pixel hit-testing disabled (canvas tainted, likely file:// origin). ' +
+          'Serve over http(s) to restore click-through on transparent tab/blank margins.');
+      }
+    }
+  }
+
+  if (puzzleActive) {
+    fpsFrames++;
+    if (now - lastFpsTime >= 500) {
+      currentFps = Math.round((fpsFrames * 1000) / (now - lastFpsTime));
+      fpsFrames = 0; lastFpsTime = now;
+      window.__fps = currentFps;
+      renderDiag();
+    }
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+function renderDiag() {
+  const budgetMs = 16.6;
+  const native = `${video.videoWidth || 0}x${video.videoHeight || 0}`;
+  const puzzle = offCanvas ? `${offCanvas.width}x${offCanvas.height}` : '—';
+  const groupCount = pieces.length ? new Set(pieces.map(p => p.group)).size : 0;
+  diagEl.textContent =
+    `native ${native}  puzzle ${puzzle}  groups ${groupCount}/${pieces.length}  ` +
+    `fps ${currentFps}  draw ${lastDrawMs.toFixed(1)}ms`;
+
+  if (canvasReadBlocked) {
+    diagEl.textContent += `  ⚠ file:// detected — serve over http(s) for precise edge click-through`;
+    diagEl.classList.add('warn');
+  }
+
+  if (currentFps > 0 && currentFps < 55) {
+    diagEl.classList.add('warn');
+    const bottleneck = lastDrawMs > budgetMs
+      ? `own draw loop too slow (${lastDrawMs.toFixed(1)}ms > ${budgetMs}ms budget)`
+      : `external (vsync/compositor/throttling) — our draw cost is only ${lastDrawMs.toFixed(1)}ms`;
+    diagEl.textContent += `  ⚠ ${bottleneck}`;
+  } else {
+    diagEl.classList.remove('warn');
+  }
+}
+
+/* ── Test/debug hook ─────────────────────────────────── */
+window.__getState = () => ({
+  puzzleActive,
+  total: pieces.length,
+  groupCount: pieces.length ? new Set(pieces.map(p => p.group)).size : 0,
+  solved: pieces.length > 0 && pieces[0].group.locked && pieces.every(p => p.group === pieces[0].group),
+  isSolved, solvedAt,
+  expectedFadeAlpha: solvedAt === null ? null : Math.max(0, 1 - (performance.now() - solvedAt) / SOLVED_FADE_MS) * 0.85,
+  hintArmed, hintPieceIndex: hintPiece ? pieces.indexOf(hintPiece) : null,
+  marginCss, MARGIN, pieceSrcW, pieceSrcH, dispW, dispH,
+  pieceCssW, pieceCssH,
+  pieces: pieces.map(p => ({
+    col: p.col, row: p.row, isCorner: p.isCorner,
+    groupId: p.group.id, locked: p.group.locked,
+    rotation: p.rotation, effRotation: effectiveRotation(p),
+    cur: pieceAbsolutePos(p), home: { ...p.home }, dirs: { ...p.dirs }
+  }))
+});
+window.__testSetRotation = (index, deg) => {
+  const p = pieces[index];
+  const delta = deg - p.rotation;
+  for (const m of p.group.pieces) {
+    m.rotation += delta;
+    m.canvas.style.transform = `rotate(${m.rotation}deg)`;
+    placeCanvasAt(m);
+  }
+};
+window.__testSetPos = (index, x, y) => {
+  const p = pieces[index];
+  p.group.anchorX = x - p.localDx;
+  p.group.anchorY = y - p.localDy;
+  for (const m of p.group.pieces) placeCanvasAt(m);
+};
+window.__testCheckConnections = (index) => checkConnections(pieces[index].group);
+</script>
+</body>
+</html>
