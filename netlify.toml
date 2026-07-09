@@ -1,0 +1,11 @@
+# Netlify build/deploy config for Video Jigsaw.
+# The site is a single static index.html generated from index.src.html.
+[build]
+  command = "npm run build"
+  publish = "."
+
+# Never serve the readable source of the app (keeps the obfuscation meaningful).
+[[redirects]]
+  from = "/index.src.html"
+  to = "/index.html"
+  status = 404
